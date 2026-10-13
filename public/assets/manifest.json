@@ -1,0 +1,63 @@
+{
+  "font": "font.ttf",
+  "atlas": "font-atlas.png",
+  "atlasMap": "font-atlas.json",
+  "logo": "logo.png",
+  "background": [
+    "bg-1.png",
+    "bg-2.png"
+  ],
+  "sounds": [
+    {
+      "name": "snd_cancel",
+      "file": "sounds/snd_cancel.m4a",
+      "bytes": 8554
+    },
+    {
+      "name": "snd_denied",
+      "file": "sounds/snd_denied.m4a",
+      "bytes": 7559
+    },
+    {
+      "name": "snd_move",
+      "file": "sounds/snd_move.m4a",
+      "bytes": 9175
+    },
+    {
+      "name": "snd_music",
+      "file": "sounds/snd_music.m4a",
+      "bytes": 712870
+    },
+    {
+      "name": "snd_option",
+      "file": "sounds/snd_option.m4a",
+      "bytes": 8044
+    },
+    {
+      "name": "snd_page",
+      "file": "sounds/snd_page.m4a",
+      "bytes": 9757
+    },
+    {
+      "name": "snd_select",
+      "file": "sounds/snd_select.m4a",
+      "bytes": 9959
+    },
+    {
+      "name": "snd_select1",
+      "file": "sounds/snd_select1.m4a",
+      "bytes": 9034
+    },
+    {
+      "name": "snd_select2",
+      "file": "sounds/snd_select2.m4a",
+      "bytes": 8835
+    },
+    {
+      "name": "snd_start",
+      "file": "sounds/snd_start.m4a",
+      "bytes": 42347
+    }
+  ],
+  "placeholder": "placeholder.png"
+}

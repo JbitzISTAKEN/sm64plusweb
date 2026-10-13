@@ -1,0 +1,15 @@
+{
+  "name": "sm64plus-launcher-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser/port version of the SM64Plus launcher (GameMaker original by MorsGames)",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js --port 0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

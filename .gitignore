@@ -1,0 +1,8 @@
+node_modules/
+.DS_Store
+*.log
+
+# Local checkout of the game repository, if one is used for assets
+game/
+textures/
+build/

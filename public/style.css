@@ -1,0 +1,21 @@
+/* The launcher draws everything itself, so the page is just the canvas. */
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #09070b;      /* COLOR_BLACK $0B0709 */
+  cursor: default;
+}
+
+#screen {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  image-rendering: pixelated;
+}
+
+#rom-input {
+  position: absolute;
+  left: -9999px;
+}
