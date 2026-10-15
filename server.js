@@ -37,8 +37,22 @@ const MIME = {
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".ico": "image/x-icon",
-  ".txt": "text/plain; charset=utf-8"
+  ".txt": "text/plain; charset=utf-8",
+  ".wasm": "application/wasm",
+  ".data": "application/octet-stream",
+  ".m4a": "audio/mp4"
 };
+
+// Where the WebAssembly build lives. SM64PLUS_WASM_DIR overrides it; otherwise the
+// copy that ships next to the launcher is used.
+const WASM_DIR = process.env.SM64PLUS_WASM_DIR || path.join(ROOT, "wasm");
+
+// The settings.ini the launcher had at the moment Start Game was pressed. The
+// browser fetches it over /api/launch-handoff and writes it into the module's
+// filesystem in preRun, before the game's main() reads it. Keeping it server side
+// means the file never has to make a round trip through localStorage, and it is
+// consumed once.
+let pendingLaunch = null;
 
 ensureDirs();
 
@@ -278,8 +292,27 @@ function launchGame({ copyGfx = true } = {}) {
       builds.log(`! Could not copy the gfx folder: ${err.message}`);
     }
   }
+
+  // The WebAssembly build runs in the browser, so it is served from /game/ rather
+  // than spawned. It reads the very settings.ini the launcher has been writing all
+  // along, which is handed over through the session map below.
+  const wasmEntry = path.join(WASM_DIR, "index.html");
+  if (exists(wasmEntry)) {
+    const handoff = { at: Date.now(), ini: readTextOr(SETTINGS_INI) || "" };
+    pendingLaunch = handoff;
+    // /game/ rather than /game/index.html: the page is served at that path, so the
+    // query string survives and the emscripten loader's relative URLs still resolve.
+    return { launched: true, mode: "wasm", url: "/game/" };
+  }
+
   const exe = exePath();
-  if (!exe) return { launched: false, reason: "The game has not been built yet." };
+  if (!exe) {
+    return {
+      launched: false,
+      reason: "No game build found. Either build sm64plus natively, or point "
+        + "SM64PLUS_WASM_DIR at a WebAssembly build."
+    };
+  }
   try {
     const child = spawn(exe, [], { cwd: BUILD_DIR, detached: true, stdio: "ignore" });
     child.on("error", (err) => console.error(`Could not start ${exe}: ${err.message}`));
@@ -296,6 +329,138 @@ function copyDir(from, to) {
   return true;
 }
 
+// ---------------------------------------------------------------- skyboxes
+//
+// The .data shipped with this WebAssembly build is missing four whole skyboxes:
+// bidw, bitfs, bits and cake - 225 of the 32x32 tiles between them. Every level
+// that uses one of them renders with a blank sky, because import_texture_custom()
+// gets a NULL back from stbi_load() and substitutes the missing-texture swatch.
+//
+// The tiles are not in the .data because they are produced at build time by
+// tools/skyconv --write-tiles from textures/skyboxes/*.png (and levels/ending/cake.png
+// for the ending), and the build that produced this .wasm only packed seven of the
+// eleven. The source PNGs are all present in the repo, and skyconv is the same tool
+// upstream uses, so the missing tiles are regenerated here with the upstream tool
+// rather than hand-made.
+//
+// The result is cached in SKYBOX_CACHE_DIR. Regenerating is a no-op once the cache
+// is populated.
+const SKYBOX_CACHE_DIR = path.join(HOME, "skybox_tiles");
+const SKYBOX_SOURCES = [
+  { name: "bidw", type: "sky", png: "textures/skyboxes/bidw.png" },
+  { name: "bitfs", type: "sky", png: "textures/skyboxes/bitfs.png" },
+  { name: "bits", type: "sky", png: "textures/skyboxes/bits.png" },
+  { name: "cake", type: "cake", png: "levels/ending/cake.png" },
+];
+
+// The skyboxes that are already packed in the .data, so nothing is generated twice.
+const SKYBOX_PACKED = ["bbh", "ccm", "cloud_floor", "clouds", "ssl", "water", "wdw"];
+
+let skyboxCache = null;
+
+function generateSkyboxTiles() {
+  if (skyboxCache) return skyboxCache;
+
+  skyboxCache = { tiles: {}, missing: [] };
+
+  const skyconv = path.join(REPO_DIR, "tools", "skyconv");
+  if (!exists(skyconv)) {
+    skyboxCache.missing.push("tools/skyconv is not built (run: make -C tools skyconv)");
+    return skyboxCache;
+  }
+
+  const wanted = SKYBOX_SOURCES.filter((s) => !SKYBOX_PACKED.includes(s.name));
+  const outDir = path.join(SKYBOX_CACHE_DIR, "tiles");
+  const binDir = path.join(SKYBOX_CACHE_DIR, "bin");
+
+  for (const src of wanted) {
+    const png = path.join(REPO_DIR, src.png);
+    if (!exists(png)) {
+      skyboxCache.missing.push(`${src.name}: ${src.png} not found`);
+      continue;
+    }
+    // --split writes <outdir>/<name>_skybox.c, so `bin` has to exist first.
+    fs.mkdirSync(outDir, { recursive: true });
+    fs.mkdirSync(binDir, { recursive: true });
+    const result = spawnSync(skyconv, [
+      "--type", src.type,
+      "--split", png, binDir,
+      "--store-names",
+      "--write-tiles", outDir,
+    ], { cwd: REPO_DIR, encoding: "utf8" });
+    if (result.status !== 0) {
+      skyboxCache.missing.push(`${src.name}: skyconv failed (${(result.stderr || "").trim()})`);
+    }
+  }
+
+  if (!exists(outDir)) return skyboxCache;
+
+  for (const file of fs.readdirSync(outDir)) {
+    if (!file.endsWith(".rgba16.png")) continue;
+    // The game asks for gfx/<name>.png, which is where Makefile puts skybox_tiles.
+    skyboxCache.tiles[`gfx/textures/skybox_tiles/${file}`] = path.join(outDir, file);
+  }
+
+  return skyboxCache;
+}
+
+// obj_start_game hands the game the settings.ini the launcher has been writing, and
+// configfile_load() stores whatever it reads. So a bind the launcher never assigned,
+// written as 0, does not mean "unset" - it means "bound to button 0".
+//
+// The real defaults live in the game's own launcher/input_presets/Default.ini
+// (button_a = 2, key_a = 38, ...). Any row sitting at 0 is one the player never
+// touched, so it is replaced from that preset rather than dropped: the player still
+// gets their own binds wherever they set one, and everything else keeps the shipped
+// defaults. Rows that are 0 in Default.ini too (button_cleft, for instance) stay 0,
+// which is genuinely unbound.
+//
+// Only CONTROLLER MAPPING, KEYBOARD MAPPING and MOUSE are touched. Everything else
+// is passed through byte for byte.
+function fillUnsetBindings(ini) {
+  const defaults = readTextOr(path.join(LAUNCHER_DIR, "input_presets", "Default.ini"));
+  if (!ini || !defaults) return ini || "";
+
+  const readDefaults = (wanted) => {
+    const out = new Map();
+    let section = "";
+    for (const line of defaults.split(/\r?\n/)) {
+      const header = line.match(/^\s*\[(.+?)\]\s*$/);
+      if (header) { section = header[1]; continue; }
+      const kv = line.match(/^\s*(\w+)\s*=\s*"?([^"]*)"?\s*$/);
+      if (kv && section === wanted && kv[2] !== "0") out.set(kv[1], kv[2]);
+    }
+    return out;
+  };
+
+  const wanted = new Set(["CONTROLLER MAPPING", "KEYBOARD MAPPING", "MOUSE"]);
+  const cache = new Map();
+  const out = [];
+  let section = "";
+  for (const line of ini.split(/\r?\n/)) {
+    const header = line.match(/^\s*\[(.+?)\]\s*$/);
+    if (header) {
+      section = header[1];
+      out.push(line);
+      continue;
+    }
+    const kv = line.match(/^(\s*)(\w+)(\s*=\s*)"?([^"]*)"?(\s*)$/);
+    if (kv && wanted.has(section)) {
+      const [, indent, key, eq, value, tail] = kv;
+      if (value === "0") {
+        if (!cache.has(section)) cache.set(section, readDefaults(section));
+        const fallback = cache.get(section).get(key);
+        if (fallback !== undefined) {
+          out.push(`${indent}${key}${eq}"${fallback}"${tail}`);
+          continue;
+        }
+      }
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 // ---------------------------------------------------------------- routes
 
 async function handleApi(req, res, url) {
@@ -304,6 +469,27 @@ async function handleApi(req, res, url) {
   if (route === "GET /api/bootstrap") return json(res, 200, await bootstrap());
 
   if (route === "GET /api/state") return json(res, 200, await currentState());
+
+  // Consumed once: the game page asks for the settings.ini that was current when
+  // Start Game was pressed, so the options the user just set are the ones the game
+  // boots with.
+  if (route === "GET /api/launch-handoff") {
+    const payload = pendingLaunch || { at: 0, ini: readTextOr(SETTINGS_INI) || "" };
+    pendingLaunch = null;
+    return json(res, 200, { at: payload.at, ini: fillUnsetBindings(payload.ini) });
+  }
+
+  // The four skyboxes missing from the .data, regenerated with tools/skyconv and
+  // handed to the game page as base64 so it can write them into its filesystem
+  // before the game boots. 225 tiles, ~900 KB, fetched once per launch.
+  if (route === "GET /api/skyboxes") {
+    const cache = generateSkyboxTiles();
+    const files = {};
+    for (const [name, file] of Object.entries(cache.tiles)) {
+      files[name] = fs.readFileSync(file).toString("base64");
+    }
+    return json(res, 200, { files, missing: cache.missing, count: Object.keys(files).length });
+  }
 
   if (route === "GET /api/tools") return json(res, 200, { tools: toolStatus(), cpus: os.cpus().length });
 
@@ -440,6 +626,29 @@ async function handleApi(req, res, url) {
 
 // ---------------------------------------------------------------- static
 
+// One file out of the WebAssembly build directory, with the path traversal guard
+// and the caching policy: the 3.5 MB .data and the 8.9 MB .wasm are worth keeping
+// for an hour, everything else has to reflect a rebuild immediately.
+async function sendWasmFile(res, rest) {
+  const filePath = path.join(WASM_DIR, decodeURIComponent(rest));
+  if (!filePath.startsWith(WASM_DIR)) {
+    res.writeHead(403).end("Forbidden");
+    return;
+  }
+  try {
+    const data = await fsp.readFile(filePath);
+    const heavy = rest.endsWith(".data") || rest.endsWith(".wasm");
+    res.writeHead(200, {
+      "Content-Type": MIME[path.extname(filePath)] || "application/octet-stream",
+      "Cache-Control": heavy ? "public, max-age=3600" : "no-cache"
+    });
+    res.end(data);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/plain" })
+      .end(`Not found: ${rest}\nExpected the WebAssembly build in ${WASM_DIR}`);
+  }
+}
+
 async function serveFile(res, filePath) {
   try {
     const data = await fsp.readFile(filePath);
@@ -476,6 +685,15 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname.startsWith("/api/")) {
       await handleApi(req, res, url);
+    } else if (url.pathname === "/game" || url.pathname === "/game/") {
+      // /game/ serves the page itself rather than redirecting to /game/index.html,
+      // so the launcher's query string (?menu=1 and friends) survives the handoff
+      // and the game runs at /game/?menu=1. Relative asset URLs still resolve,
+      // because the document's base directory is /game/ either way.
+      await sendWasmFile(res, "index.html");
+    } else if (url.pathname.startsWith("/game/")) {
+      // The WebAssembly build.
+      await sendWasmFile(res, url.pathname.slice("/game/".length));
     } else if (url.pathname.startsWith("/gfx/")) {
       // the game's own textures (GFX_PATH in the original), one folder deep
       const parts = url.pathname.replace("/gfx/", "").split("/").filter(Boolean);

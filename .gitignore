@@ -6,3 +6,8 @@ node_modules/
 game/
 textures/
 build/
+
+# The WebAssembly build is a build artefact, not source.
+wasm/*.wasm
+wasm/*.data
+wasm/*.js

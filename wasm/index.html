@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>SM64Plus</title>
+<link rel="icon" type="x-icon" href="favicon.ico">
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #000;
+    overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #container {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas.emscripten {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    background: #000;
+    outline: none;
+  }
+  /* Emscripten's stock template injects a progress/status area. We keep it out
+     of the way; sm64plus draws its own loading state. */
+  #status, .emscripten { display: none; }
+
+  /* Only surfaces a real failure. The old overlay (title, FPS/frame counter,
+     control legend) is gone - the game draws its own HUD. */
+  #err {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: none;
+    padding: 24px;
+    color: #f88;
+    background: #000e;
+    font: 12px/1.5 ui-monospace, Menlo, monospace;
+    white-space: pre-wrap;
+    overflow: auto;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas class="emscripten" id="canvas" tabindex="-1"
+          oncontextmenu="event.preventDefault()"></canvas>
+</div>
+
+<div id="err"></div>
+
+<script>
+(function () {
+  var canvas = document.getElementById('canvas');
+  var errBox = document.getElementById('err');
+
+  function sizeCanvas() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  sizeCanvas();
+  window.addEventListener('resize', sizeCanvas);
+
+  // Live diagnostics, now to the console rather than an on-screen overlay: the
+  // game draws its own HUD and the old debug text sat over the top of it.
+  var glInfo = 'no gl';
+
+  function setDiag(text) { console.log('[diag] ' + text); }
+
+  function refreshGlInfo() {
+    var g = window.Module && window.Module['webGLContext'];
+    if (!g) return;
+    try {
+      glInfo = g.getParameter(g.VERSION) + ' | ' + g.getParameter(g.RENDERER);
+    } catch (e) { glInfo = 'gl query failed'; }
+  }
+
+  // NOTE: window.Module is not created until further down. Touching it here
+  // (e.g. window.Module['x'] = ...) throws on a fresh page and silently kills
+  // this whole script, which is why the game appeared to never boot. Install the
+  // hooks once Module exists.
+  var lastStage = 'booting';
+
+  function installHooks() {
+    window.Module['onWebFrame'] = function (n) {
+      refreshGlInfo();
+      setDiag('stage=' + lastStage + ' | frames=' + n + ' | gl=' + glInfo);
+    };
+    window.Module['onWebStage'] = function (s) {
+      lastStage = s;
+      setDiag('stage=' + s + ' | frames=0');
+    };
+  }
+
+  function showError(msg) {
+    errBox.textContent += msg + '\n';
+    errBox.style.display = 'block';
+  }
+
+  // Surface anything fatal instead of letting it vanish into the console.
+  window.addEventListener('error', function (e) {
+    showError('Error: ' + (e.message || e.error));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    showError('Promise: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
+  });
+
+  // The game drives its own frame loop via requestAnimationFrame; Emscripten
+  // must not install one of its own or it will starve the game's.
+  //
+  // The GameMaker launcher's settings.ini is held by the server, which snapshotted
+  // it at the moment Start Game was pressed. Emscripten's filesystem is in-memory,
+  // so the file is written into it in preRun, before the game's main() reads it.
+  var LAUNCHER_KEY = 'sm64plus.web.settings.v1';
+
+  // Read straight from the launcher's server rather than localStorage, so the
+  // options the player just changed are the ones the game boots with.
+  function fetchLauncherIni() {
+    return fetch('/api/launch-handoff', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) { return j && j.ini && j.ini.trim() ? j.ini : null; })
+      .catch(function () { return null; });
+  }
+
+  // Four whole skyboxes (bidw, bitfs, bits, cake) are absent from this build's
+  // .data - 225 tiles. import_texture_custom() gets NULL from stbi_load() for each
+  // and falls back to the missing-texture swatch, so every level that uses one of
+  // them has a blank sky. The server regenerates them with the upstream tools/skyconv
+  // from the repo's own source PNGs and serves them here; they are written into the
+  // filesystem in preRun, before the game reads anything.
+  function fetchSkyboxTiles() {
+    return fetch('/api/skyboxes', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) { return j && j.files && Object.keys(j.files).length ? j : null; })
+      .catch(function () { return null; });
+  }
+
+  // Kept for the standalone case: this page can still be opened on its own, and the
+  // previous launcher's localStorage keys are honoured if present.
+  var RAW_INI_KEY = 'sm64plus.web.settings.ini';
+
+  function buildSettingsIni() {
+    // Preferred path: the real GameMaker launcher's settings file, from the server.
+    var fromServer = window.__launcherIni;
+    if (fromServer && fromServer.trim()) return fromServer;
+
+    try {
+      var ini = localStorage.getItem(RAW_INI_KEY);
+      if (ini && ini.trim()) return ini;
+    } catch (e) { /* fall through to the JSON form */ }
+
+    var raw = null;
+    try { raw = localStorage.getItem(LAUNCHER_KEY); } catch (e) { return null; }
+    if (!raw) return null;
+    var saved;
+    try { saved = JSON.parse(raw); } catch (e) { return null; }
+    if (!saved || !saved.values) return null;
+
+    var lines = ['[settings]'];
+    Object.keys(saved.values).forEach(function (name) {
+      var v = saved.values[name];
+      if (typeof v === 'boolean') lines.push(name + ' = "' + (v ? 'true' : 'false') + '"');
+      else if (typeof v === 'number') lines.push(name + ' = "' + v + '"');
+    });
+    return lines.join('\n') + '\n';
+  }
+
+  window.Module = {
+    canvas: canvas,
+
+    // Must be synchronous. This Emscripten build does not await a promise returned
+    // from preRun, so an async fetch here races main(): configfile_load() runs
+    // first, finds no settings.ini, writes the defaults, and every option the
+    // player picked is then ignored. The fetch therefore happens before the module
+    // script is even loaded (see bootWithSettings below), leaving this a plain
+    // synchronous write into a filesystem that is guaranteed to exist.
+    preRun: [function () {
+      var ini = buildSettingsIni();
+      if (ini) {
+        try {
+          FS.writeFile('/settings.ini', ini);
+          console.log('[launcher] applied settings.ini from the launcher');
+        } catch (e) {
+          console.warn('[launcher] could not write settings.ini: ' + e);
+        }
+      } else {
+        console.log('[launcher] no settings from the launcher; using game defaults');
+      }
+
+      var sky = window.__skyboxes;
+      if (!sky || !sky.files) return;
+      var written = 0, failed = 0;
+      Object.keys(sky.files).forEach(function (name) {
+        try {
+          var bin = atob(sky.files[name]);
+          var bytes = new Uint8Array(bin.length);
+          for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          // mkdir -p for gfx/textures/skybox_tiles
+          var parts = name.split('/');
+          var dir = '';
+          for (var p = 0; p < parts.length - 1; p++) {
+            dir += '/' + parts[p];
+            try { FS.mkdir(dir); } catch (e) { /* already exists */ }
+          }
+          FS.writeFile('/' + name, bytes);
+          written++;
+        } catch (e) {
+          failed++;
+          if (failed < 4) console.warn('[launcher] skybox ' + name + ': ' + e);
+        }
+      });
+      console.log('[launcher] restored ' + written + ' missing skybox tiles' +
+        (failed ? ' (' + failed + ' failed)' : ''));
+    }],
+
+
+    print: function (text) {
+      console.log(text);
+    },
+    printErr: function (text) {
+      console.error(text);
+      if (/abort|error|fail|unhandled/i.test(text)) showError(text);
+    },
+
+    setStatus: function (text) {
+      // Deliberately ignored: sm64plus renders its own status.
+    },
+
+    // Emscripten expects the canvas to be focusable for keyboard input, and the
+    // browser only sends key events to the focused element.
+    onRuntimeInitialized: function () {
+      canvas.setAttribute('tabindex', '0');
+      canvas.focus();
+    },
+
+    // Fullscreen is handled by the game's own browser backend (gfx_web.c).
+    // Provide the hook anyway so the F key / any caller works, and so nothing
+    // ends up calling a missing function.
+    requestFullscreen: function () {
+      if (document.fullscreenElement) {
+        if (document.exitFullscreen) document.exitFullscreen();
+      } else if (canvas.requestFullscreen) {
+        canvas.requestFullscreen();
+      }
+    },
+  };
+
+  installHooks();
+
+  // Keep focus on the canvas so the game keeps receiving input.
+  window.addEventListener('mousedown', function () { canvas.focus(); });
+  window.addEventListener('keydown', function () { canvas.focus(); });
+
+  // F toggles fullscreen without needing the emscripten scaffold button.
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'f' || e.key === 'F') {
+      Module.requestFullscreen();
+    }
+  });
+
+  // Load the module only once the settings and the missing skybox tiles are in hand.
+  // The game reads settings.ini from its filesystem during startup, and an async preRun
+  // hook is not awaited by this Emscripten build, so those files have to be fetched
+  // before sm64.us.js is even requested. Otherwise configfile_load() runs against an
+  // empty filesystem, writes the defaults, and every option the player set is lost -
+  // and the skyboxes are missing for good.
+  Promise.all([
+    fetchLauncherIni().catch(function () { return null; }),
+    fetchSkyboxTiles().catch(function () { return null; })
+  ]).then(function (results) {
+    if (results[0]) window.__launcherIni = results[0];
+    if (results[1]) {
+      window.__skyboxes = results[1];
+      if (results[1].missing && results[1].missing.length) {
+        console.warn('[launcher] skyboxes not restored: ' + results[1].missing.join('; '));
+      }
+    }
+    var s = document.createElement('script');
+    s.async = true;
+    s.src = 'sm64.us.js';
+    document.body.appendChild(s);
+  });
+})();
+</script>
+</body>
+</html>

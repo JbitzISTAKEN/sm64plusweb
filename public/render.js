@@ -50,6 +50,18 @@ export function easeOutSine(a, b, amount) {
   return c * Math.sin(amount * (Math.PI / 2)) + a;
 }
 
+export function easeOutQuart(a, b, amount) {
+  const c = b - a;
+  return -c * ((amount - 1) ** 4 - 1) + a;
+}
+
+// ease_out_back(a, b, amount, overshoot = 1.70158)
+export function easeOutBack(a, b, amount, overshoot = 1.70158) {
+  const c = b - a;
+  const t = amount - 1;
+  return c * (t ** 2 * ((overshoot + 1) * t + overshoot) + 1) + a;
+}
+
 export function easeOutQuint(a, b, amount) {
   const c = b - a;
   return c * ((amount - 1) ** 5 + 1) + a;
@@ -308,24 +320,28 @@ export class Renderer {
     const image = this.sprites.get(name);
     if (!image || alpha <= 0) return;
 
-    if (image.width > 64) {
-      sctx.save();
-      sctx.globalAlpha = alpha;
-      sctx.imageSmoothingEnabled = true;
-      sctx.drawImage(image, 0, 0, width, height);
-      sctx.restore();
-      sctx.globalAlpha = 1;
-      return;
-    }
+    // Everything goes through the same repeat, so every background slides at the
+    // same _x and _y and loops the same way.
+    //
+    // The period is what decides whether the wrap is visible. A tile hides it because
+    // advancing by exactly one period brings up an identical copy - that is why
+    // spr_void's 18x24 period is invisible. A skybox drawn one-to-one has no period
+    // at all, so the drift would tear a seam across it. Giving it the surface itself
+    // as the period fixes that without changing how it looks: one skybox still covers
+    // the screen exactly once, but the copies either side are the same picture, so
+    // sliding forever is seamless. It is the original's tiling at the only scale a
+    // stretched skybox can loop at.
+    const periodX = image.width > 64 ? width : image.width;
+    const periodY = image.width > 64 ? height : image.height;
 
-    const tileWidth = image.width;
-    const tileHeight = image.height;
     const pattern = sctx.createPattern(image, "repeat");
     // The drift is folded into the tile so it keeps sliding forever without the
     // translation growing without bound, which is what _x and _y do in the original.
-    const driftX = (((x % tileWidth) + tileWidth) % tileWidth);
-    const driftY = (((y % tileHeight) + tileHeight) % tileHeight);
-    pattern.setTransform(new DOMMatrix([1, 0, 0, 1, driftX, driftY]));
+    const driftX = (((x % periodX) + periodX) % periodX);
+    const driftY = (((y % periodY) + periodY) % periodY);
+    pattern.setTransform(new DOMMatrix([
+      periodX / image.width, 0, 0, periodY / image.height, driftX, driftY
+    ]));
     sctx.save();
     sctx.imageSmoothingEnabled = !nearest;
     sctx.globalAlpha = alpha;
@@ -552,8 +568,14 @@ export class Renderer {
     return lines.length * separation * scale;
   }
 
-  // draw_text_custom(): wrapped white text with a shadow. `valign` is GameMaker's
-  // fa_top/fa_bottom, which matters for the texts that sit on the room's edges.
+  // draw_text_custom(): wrapped white text with a shadow. `align` and `valign` are
+  // GameMaker's draw_set_halign / draw_set_valign.
+  //
+  // The alignment is applied here rather than by the GML's draw_text_ext_transformed,
+  // because the port's primitive is drawTextLine, which lays glyphs out from x
+  // rightward and has no alignment of its own. fa_left is x, fa_right is x - width
+  // and fa_center is x - width/2. Dropping that offset draws every centred line
+  // starting at the centre instead of on it.
   drawTextCustom(x, y, str, scale, align = "left", alpha = 1, valign = "top") {
     const lines = wrapText(str, (this.roomWidth / scale) - 32, scale);
     const lineHeight = 12 * scale;
@@ -564,6 +586,27 @@ export class Renderer {
       const lineX = align === "right" ? x - width : align === "center" ? x - width / 2 : x;
       this.drawTextLine(lineX + scale, y + offsetY + scale, line, scale, COLOR.black, alpha);
       this.drawTextLine(lineX, y + offsetY, line, scale, COLOR.white, alpha);
+      offsetY += lineHeight;
+    }
+    return lines.length * lineHeight;
+  }
+
+  // draw_text_custom_inverted(): the same two calls as draw_text_custom with the
+  // colours swapped - white at the +scale shadow offset, black on the face. The
+  // offset is down and right in both, so nothing moves; only the draw order differs.
+  //
+  // obj_start_game sets fa_center and fa_middle before calling it, so the block is
+  // centred on both axes: the first line is pulled up by half the block and each line
+  // is offset from the anchor by half its own width.
+  drawTextCustomInverted(x, y, str, scale, alpha = 1) {
+    const lines = wrapText(str, (this.roomWidth / scale) - 32, scale);
+    const lineHeight = 12 * scale;
+    let offsetY = -(lines.length * lineHeight) / 2;
+    for (const line of lines) {
+      const width = line.length * this.glyphWidth * scale;
+      const lineX = x - width / 2;
+      this.drawTextLine(lineX + scale, y + offsetY + scale, line, scale, COLOR.white, alpha);
+      this.drawTextLine(lineX, y + offsetY, line, scale, COLOR.black, alpha);
       offsetY += lineHeight;
     }
     return lines.length * lineHeight;

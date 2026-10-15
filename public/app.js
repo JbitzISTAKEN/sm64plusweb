@@ -12,6 +12,7 @@
 import {
   Renderer, COLOR, BASE_WIDTH, BASE_HEIGHT, MIN_WIDTH, MIN_HEIGHT,
   lerp, clamp, sign, easeInCubic, easeOutCubic, easeOutSine, easeOutQuint, easeOutElastic, loadImage,
+  easeOutQuart, easeOutBack,
   mergeColor, colorStateHex
 } from "./render.js";
 import { Ini } from "./shared/ini.js";
@@ -250,17 +251,18 @@ const boot = {
       + "If you like what you're seeing here, please show your support to Nintendo directly!\n\nPress any key to continue.";
 
     const state = app.data.state;
-    if (!state.gameBuilt) {
-      this.state = 0;
-    } else if (state.updatePending) {
+    // No native build is needed any more: the WebAssembly build is served from /game/
+    // and needs no MSYS2, no ROM upload and no make. So the "Hello there! Before
+    // starting, we first need to build the game" branch (obj_init/Step_0.gml state 1,
+    // and the ROM picker in state 2) is never entered - the disclaimer slides straight
+    // out into the menu, whatever check_file() reports.
+    this.state = 0;
+    this.skipBuild = true;
+    if (state.updatePending) {
       this.update = true;
       this.str = "- A LAUNCHER UPDATE HAS BEEN DETECTED -\n\nThe launcher will now update the game files.\n\n"
         + "Press any key to update.\nPress <Delete> to skip.\n\n"
         + "PS: You can later do this manually by choosing \"Update\" from the main menu.";
-      this.state = 0;
-    } else {
-      this.slideOut = 1;
-      this.state = 3;
     }
   },
 
@@ -276,6 +278,12 @@ const boot = {
     if (this.state === 0) {
       if (input.checkAny()) {
         this.externalEnabled = !input.check("del");
+        // No build step in the browser port: acknowledge the disclaimer and slide out
+        // into the menu rather than walking the MSYS2/ROM states.
+        if (this.skipBuild) {
+          this.slideOut = 1;
+          return;
+        }
         this.state++;
         if (checkFile(false)) {
           this.str = app.data.state.platform === "win32"
@@ -616,11 +624,137 @@ async function startAction(action) {
   pollBuild();
 }
 
+// obj_start_game, all three of its events. The original wipes the screen to white over
+// ease_out_sine(0, 1, progress), slides "Launching game..." up from the bottom edge on
+// ease_out_quart(room_height, 0, progress), then on the way out plays the same text back
+// down on ease_out_back(-room_height, 0, progress) while progress decays.
+const startGame = {
+  progress: 0,
+  slideOut: 0,
+  running: 0,
+  target: null,
+  // The WebAssembly build has to fetch 8.9 MB of wasm plus 3.7 MB of asset data
+  // after the page hands over, so the screen is held for a few seconds instead of
+  // flashing past and leaving the browser on a black canvas. Not part of the
+  // original: it spawned a process that was already loaded.
+  holdFrames: 300,
+  // obj_start_game/Create_0.gml: timer(go_windowed, 45); timer(launch_game, 60).
+  // GameMaker's timer() counts FRAMES, so the executable is started on frame 60 -
+  // long after progress has reached 1 on frame 32 and the white wipe is opaque.
+  // Firing this on a 60ms setTimeout instead ran it on frame ~4, with progress still
+  // near 0, which left the wipe at ease_out_sine(0, 1, 0.1) and the room showing through.
+  launchFrame: 60,
+
+  create() {
+    this.progress = 0;
+    this.slideOut = 0;
+    this.running = 0;
+    this.target = null;
+    this.hold = 0;
+    this.frame = 0;
+    app.screen = "start";
+    musicPlay(false);
+    sfxPlay("start");
+  },
+
+  async finish() {
+    if (this.running) return;
+    this.running = 1;
+    try {
+      // The settings have to reach the server before it snapshots them for the
+      // handoff, otherwise the game boots with whatever was last written.
+      // scheduleSave() is debounced, so the pending timer is cancelled and the
+      // write is awaited directly.
+      clearTimeout(app.saveTimer);
+      await saveSettings();
+      const { data } = await api.send("/api/launch", {});
+      if (data && data.launched === false) {
+        this.running = 0;
+        background.displayMessage(data.reason || "Couldn't start the game.");
+        this.slideOut = 1;
+        return;
+      }
+      // The WebAssembly build is served from this same origin, so the launcher stays
+      // on its own URL and the game is loaded into a frame laid over the canvas. That
+      // keeps /?menu=1 in the address bar instead of navigating to /game/, and a
+      // refresh brings the launcher straight back.
+      if (data && data.mode === "wasm" && data.url) {
+        this.target = data.url;
+      }
+      // Either way the screen now plays out (slide_out in obj_start_game/Step_0.gml)
+      // and the navigation happens during it, a few frames in.
+      this.slideOut = 1;
+    } catch {
+      this.running = 0;
+      background.displayMessage("Couldn't start the game.");
+      this.slideOut = 1;
+    }
+  },
+
+  step() {
+    // obj_start_game/Step_0.gml, in order: progress counts up (or back down once
+    // slide_out is set), and the game is launched from its own 60 frame timer.
+    if (this.slideOut) {
+      // Hold the wipe and the text for the full delay so the load is not a flash of
+      // white into a blank canvas, then bring the game up in place. The URL never
+      // changes: this document stays the launcher.
+      if (this.target) {
+        if (this.hold < this.holdFrames) { this.hold++; return; }
+        mountGameFrame(this.target);
+        return;
+      }
+      if (this.progress > 0) this.progress -= 0.03125;
+      else if (app.screen === "start") app.screen = "menu";
+      return;
+    }
+    if (this.progress < 1) this.progress += 0.03125;
+    this.frame++;
+    if (this.frame >= this.launchFrame) this.finish();
+  },
+
+  draw() {
+    const roomHeight = renderer.roomHeight;
+    // obj_start_game/Draw_0.gml, in order: the white wipe at
+    // ease_out_sine(0, 1, progress), then the inverted text. progress stays at 1
+    // for the whole hold, so the wipe is opaque without needing a special case.
+    renderer.drawRect(0, 0, renderer.roomWidth, roomHeight, COLOR.white,
+      easeOutSine(0, 1, this.progress));
+    const offset = this.slideOut
+      ? easeOutBack(-roomHeight, 0, this.progress)
+      : easeOutQuart(roomHeight, 0, this.progress);
+    renderer.drawTextCustomInverted(renderer.roomWidth / 2, roomHeight / 2 + offset,
+      "Launching game...", 2);
+  }
+};
+
 async function runGame() {
-  sfxPlay("start");
-  musicPlay(false);
-  const { data } = await api.send("/api/launch", {});
-  background.displayMessage(data.launched ? "Game started." : data.reason || "Couldn't start the game.");
+  startGame.create();
+}
+
+// The game runs in a frame on top of the launcher canvas, so the address bar keeps
+// showing the launcher's own URL. The frame is only created once the launch screen
+// has played out, and the launcher's main loop stops while it is up so the two do
+// not both fight for the keyboard.
+function mountGameFrame(url) {
+  if (app.gameFrame) return;
+  app.gameFrame = document.createElement("iframe");
+  app.gameFrame.src = url;
+  app.gameFrame.title = "SM64Plus";
+  app.gameFrame.allow = "autoplay; fullscreen; gamepad";
+  app.gameFrame.setAttribute("tabindex", "0");
+  Object.assign(app.gameFrame.style, {
+    position: "fixed",
+    inset: "0",
+    width: "100%",
+    height: "100%",
+    border: "0",
+    background: "#000",
+    zIndex: "10"
+  });
+  document.body.appendChild(app.gameFrame);
+  app.runningGame = true;
+  // The game owns the keyboard from here on; the launcher's step/draw loops stand down.
+  app.gameFrame.focus();
 }
 
 async function checkLauncherUpdates() {
@@ -953,7 +1087,12 @@ const settings = {
             const hovered = i === this.selectedOption;
             const shakeOffset = hovered ? Math.sin(renderer.frames) * (this.hShake || 0) : 0;
             const shakeY = hovered ? Math.sin(renderer.frames) * (this.shake || 0) : 0;
-            const xPos = roomWidth / 2 + shakeOffset;
+            // Deliberate deviation from Draw_0.gml: the option rows there are drawn at a
+            // bare room_width/2 with no _x_offset, while the title gets
+            // _x_offset+room_width/2. While x_go lerps between two tabs both are inside
+            // the +/-room_width window, so the two lists land on top of each other.
+            // Offsetting by xOffset makes the rows slide with their tab, like the title.
+            const xPos = roomWidth / 2 + xOffset + shakeOffset;
             const yPos = 72 + (i - view) * 20 + shakeY;
             const absY = 72 + (i - view) * 20;
             const topA = clamp((absY - listTop) / fadeBand, 0, 1);
@@ -983,7 +1122,8 @@ const settings = {
           }
 
           if (totalOptions - Math.round(view) > optionsPerPage) {
-            renderer.drawOption(roomWidth / 2, 72 + optionsPerPage * 20 - 4 + Math.sin(this.arrowFrames / 16), "\u007F", 1.5);
+            renderer.drawOption(roomWidth / 2 + xOffset,
+              72 + optionsPerPage * 20 - 4 + Math.sin(this.arrowFrames / 16), "\u007F", 1.5);
           }
 
           // Description
@@ -1000,7 +1140,10 @@ const settings = {
             description = option?.description || "";
           }
           const scale = wrapLines(description, roomWidth / 1.5 - 32).length * 12 > 36 ? 1 : 1.5;
-          renderer.drawTextCustom(roomWidth / 2, roomHeight - (scale === 1 ? 71 : 75), description, scale, "center");
+          // Same deviation as the rows above: the description is drawn at a bare
+          // room_width/2 in the original, so two tabs mid-slide stack their text.
+          renderer.drawTextCustom(roomWidth / 2 + xOffset,
+            roomHeight - (scale === 1 ? 71 : 75), description, scale, "center");
         }
       }
     }
@@ -1323,15 +1466,20 @@ function drawBuildScreen() {
 }
 
 function draw() {
+  // Once the game frame is up it owns the screen and the input; keep drawing behind
+  // it only so the canvas is still current if the frame is ever torn down.
+  if (app.runningGame) return;
+
   renderer.begin(COLOR.black);
   drawBackground();
 
   if (app.screen === "boot") boot.draw();
+  else if (app.screen === "start") startGame.draw();
   else if (app.screen === "menu") titleMenu.draw();
   else if (app.screen === "settings") settings.draw();
   else if (app.screen === "build") drawBuildScreen();
 
-  drawOverlayText();
+  if (app.screen !== "start") drawOverlayText();
 }
 
 // --- main loop ----------------------------------------------------------------
@@ -1343,13 +1491,21 @@ const STEP = 1000 / 60;
 function frame(now) {
   const delta = Math.min(100, now - last);
   last = now;
-  accumulator += delta;
 
-  while (accumulator >= STEP) {
-    accumulator -= STEP;
-    tick();
+  // The game runs in its own frame with its own animation loop, so the launcher stops
+  // stepping and drawing here. renderer.frames is advanced inside the branch below
+  // rather than in tick(), so it does not creep while the game is in front.
+  if (!app.runningGame) {
+    accumulator += delta;
+    while (accumulator >= STEP) {
+      accumulator -= STEP;
+      tick();
+    }
+    draw();
+  } else {
+    last = now;
+    accumulator = 0;
   }
-  draw();
   requestAnimationFrame(frame);
 }
 
@@ -1360,11 +1516,15 @@ let stepFrames = 0;
 function tick() {
   stepFrames++;
   renderer.frames = stepFrames;
+  // Key events belong to the game once its frame is up, so the launcher's own
+  // input layer stops consuming them.
+  if (app.runningGame) return;
   input.tick();
   background.step();
   // input_check_pressed() is per step: hold counters advance here, presses are cleared at the end
 
   if (app.screen === "boot") boot.step();
+  else if (app.screen === "start") startGame.step();
   else if (app.screen === "menu") titleMenu.step();
   else if (app.screen === "settings") settings.step();
   else if (app.screen === "build" && app.buildStatus?.running) {
@@ -1528,9 +1688,8 @@ function applyLauncherWindow() {
 
   boot.create();
   app.screen = "boot";
-  // The original can only reach the menu once the game has been built. ?menu=1 skips
-  // that so the menus can be looked at without a ROM.
-  if (new URLSearchParams(location.search).has("menu")) enterMenu();
+  // ?menu=1 no longer skips rm_init. The disclaimer still plays; it is the first
+  // thing the real launcher shows, and it is the room that hands over to the menu.
   app.ready = true;
   // handy for poking at the state from the console
   window.__launcher = { app, boot, titleMenu, settings, background, renderer, input };
