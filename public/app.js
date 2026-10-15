@@ -835,8 +835,13 @@ async function runGame() {
 // refused. So the window is created blank and navigated later, once the launch screen
 // has played out.
 function openGameWindow() {
-  const width = 900;
-  const height = 600;
+  // The same size as the launcher window, which is what the original's game window
+  // ends up as: DEFAULT_LAUNCHER_WIDTH/HEIGHT in scr_constants_and_globals.gml are
+  // the numbers the launcher opens itself at, and execute_shell() starts the game as
+  // a peer window rather than anything the game sizes for itself. Centred on the
+  // launcher, the way execute_shell()'s window comes up over it.
+  const width = app.launcher.window_width || 1280;
+  const height = app.launcher.window_height || 720;
   const left = window.screenX + (window.outerWidth - width) / 2;
   const top = window.screenY + (window.outerHeight - height) / 2;
   const features = `width=${width},height=${height},left=${Math.round(left)},top=${Math.round(top)}`
