@@ -1,5 +1,19 @@
 // DirectInput scan codes, exactly as used by src/game/settings.c in the game.
 // These are the values stored for TYPE_KEY options.
+//
+// The names run out at 236 because SDL splits the space in two: everything below
+// 256 is a Windows DIK code, everything from 256 up is an SDL-specific extension.
+// The shipped launcher/input_presets/Default.ini binds the four C buttons to 328,
+// 331, 333 and 336, which are the arrow keys in that upper range, so without the
+// second table those four rows render as "Unknown" even though they are bound
+// correctly. The codes and names below are the ones the game itself uses, taken
+// from src/pc/controller/controller_emscripten_keyboard.c.
+export const SDL_EXTENDED_NAMES = {
+  284: "NUMPADENTER", 285: "RCONTROL", 309: "NUMPDIVIDE", 312: "RALT",
+  327: "HOME", 328: "UP", 329: "PAGEUP", 331: "LEFT", 333: "RIGHT", 335: "END",
+  336: "DOWN", 337: "PAGEDOWN", 338: "INSERT", 339: "DELETE",
+  347: "LWIN", 348: "RWIN", 349: "APPS", 541: "PAUSE"
+};
 
 export const DIK_NAMES = {
   1: "ESCAPE", 2: "1", 3: "2", 4: "3", 5: "4", 6: "5", 7: "6", 8: "7", 9: "8", 10: "9",
@@ -80,7 +94,7 @@ const DISPLAY_NAMES = {
 };
 
 export function dikName(code) {
-  const name = DIK_NAMES[Number(code)];
+  const name = DIK_NAMES[Number(code)] || SDL_EXTENDED_NAMES[Number(code)];
   if (!name) return "None";
   if (DISPLAY_NAMES[name]) return DISPLAY_NAMES[name];
   if (/^[A-Z0-9]$/.test(name)) return name;
@@ -88,10 +102,12 @@ export function dikName(code) {
 }
 
 // GameMaker's keyboard_get_scan_name() equivalents, used by the original launcher text.
+// Looks in the DIK table first, then the SDL extended range, so a C button bound to
+// an arrow key (328, 331, 333, 336) reads as a name instead of "Unknown".
 export function keyText(code) {
   const num = Number(code);
   if (!num) return "None";
-  const name = DIK_NAMES[num];
+  const name = DIK_NAMES[num] || SDL_EXTENDED_NAMES[num];
   if (!name) return "Unknown";
   return dikName(num);
 }
