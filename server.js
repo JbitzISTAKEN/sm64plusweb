@@ -681,8 +681,13 @@ async function serveStatic(req, res, url) {
 // ---------------------------------------------------------------- server
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  // Inside the try, deliberately. A request target like "//" is a protocol-relative
+  // URL with an empty host, which makes new URL() throw, and a throw from here would
+  // reject the async handler and take the whole process down with it. The browser
+  // does send these (a favicon resolved against a path with a trailing slash), so a
+  // bad URL is a 400, not a dead server.
   try {
+    const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     if (url.pathname.startsWith("/api/")) {
       await handleApi(req, res, url);
     } else if (url.pathname === "/game" || url.pathname === "/game/") {
@@ -705,7 +710,16 @@ const server = http.createServer(async (req, res) => {
       await serveStatic(req, res, url);
     }
   } catch (err) {
-    json(res, 500, { error: err.message });
+    // ERR_INVALID_URL means the request target itself was unparseable, which is a
+    // client error rather than a server fault.
+    const code = err && err.code === "ERR_INVALID_URL" ? 400 : 500;
+    try {
+      json(res, code, { error: err.message });
+    } catch {
+      // Headers already sent, or the socket is gone. Nothing useful left to do, and
+      // throwing here would be the thing that actually kills the server.
+      try { res.end(); } catch { /* already gone */ }
+    }
   }
 });
 
