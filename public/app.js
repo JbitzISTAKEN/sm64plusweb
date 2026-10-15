@@ -180,7 +180,7 @@ const app = {
   ready: false,
   screen: "boot",          // rm_init | rm_menu
   data: null,
-  launcher: { sfx_volume: 1, music_volume: 1, fullscreen: false, quick_launch: false, scaling_mode: 1 },
+  launcher: { sfx_volume: 1, music_volume: 1, fullscreen: false, quick_launch: false, close_on_launch: false, scaling_mode: 1 },
   categories: [],
   launcherCategory: null,
   ranges: { system: [0, 1], gameConfig: [], input: [] },
@@ -652,9 +652,28 @@ const startGame = {
     this.target = null;
     this.hold = 0;
     this.frame = 0;
+    this.waitFrames = 0;
+    this.launched = 0;
+    this.closed = 0;
     app.screen = "start";
     musicPlay(false);
     sfxPlay("start");
+
+    // obj_start_game/Create_0.gml:
+    //
+    //   if (global.close_on_launch) timer(game_end, 150);
+    //   execute_shell(GAME_PATH + GAME_EXE, "", !global.close_on_launch)
+    //
+    // The third argument to execute_shell() is "wait for it to exit", and it is the
+    // inverse of close_on_launch. So the normal case is that the launcher sits here
+    // blocking inside execute_wait for as long as the game runs, and only slides back
+    // to the menu once the game is gone. A popup window is the browser's equivalent of
+    // the detached process execute_shell() spawns, and waiting on it closing is the
+    // equivalent of execute_wait returning.
+    this.closeOnLaunch = !!app.launcher.close_on_launch;
+    // A popup has to be opened inside the gesture that pressed Start Game, so it is
+    // opened blank here and navigated to the game once the launch screen has played.
+    this.gameWindow = openGameWindow();
   },
 
   async finish() {
@@ -674,16 +693,7 @@ const startGame = {
         this.slideOut = 1;
         return;
       }
-      // The WebAssembly build is served from this same origin, so the launcher stays
-      // on its own URL and the game is loaded into a frame laid over the canvas. That
-      // keeps /?menu=1 in the address bar instead of navigating to /game/, and a
-      // refresh brings the launcher straight back.
-      if (data && data.mode === "wasm" && data.url) {
-        this.target = data.url;
-      }
-      // Either way the screen now plays out (slide_out in obj_start_game/Step_0.gml)
-      // and the navigation happens during it, a few frames in.
-      this.slideOut = 1;
+      if (data && data.url) this.target = data.url;
     } catch {
       this.running = 0;
       background.displayMessage("Couldn't start the game.");
@@ -691,25 +701,100 @@ const startGame = {
     }
   },
 
+  // go_windowed() (obj_start_game/Create_0.gml:5) drops out of fullscreen so the game
+  // can have it, and launch_game() puts it back once the game is gone.
+  goWindowed() {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    document.body.classList.remove("fullscreen");
+  },
+
+  goFullscreen() {
+    if (app.launcher.fullscreen) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    }
+  },
+
+  launch() {
+    if (!this.gameWindow) return false;
+    try {
+      this.gameWindow.location = this.target;
+      this.gameWindow.focus();
+    } catch {
+      return false;
+    }
+    return true;
+  },
+
+  // obj_start_game/Step_0.gml once the game has gone:
+  //
+  //   instance_destroy();
+  //   audio_resume_sound(snd_music)
+  //   instance_create_layer(0, 0, layer, obj_title_menu);
+  //   load_settings(INI_PATH) or Recommended.ini
+  backToMenu() {
+    if (app.screen !== "start") return;
+    this.gameWindow = null;
+    musicPlay(true);
+    titleMenu.create();
+    app.screen = "menu";
+    this.goFullscreen();
+  },
+
   step() {
-    // obj_start_game/Step_0.gml, in order: progress counts up (or back down once
-    // slide_out is set), and the game is launched from its own 60 frame timer.
     if (this.slideOut) {
-      // Hold the wipe and the text for the full delay so the load is not a flash of
-      // white into a blank canvas, then bring the game up in place. The URL never
-      // changes: this document stays the launcher.
-      if (this.target) {
-        if (this.hold < this.holdFrames) { this.hold++; return; }
-        mountGameFrame(this.target);
-        return;
-      }
       if (this.progress > 0) this.progress -= 0.03125;
-      else if (app.screen === "start") app.screen = "menu";
+      else this.backToMenu();
       return;
     }
-    if (this.progress < 1) this.progress += 0.03125;
+
     this.frame++;
+    // timer(launch_game, _time + 15): hand the settings over and ask the server what
+    // to open. finish() guards on this.running, so it is safe to keep asking.
     if (this.frame >= this.launchFrame) this.finish();
+
+    if (this.progress < 1) {
+      this.progress += 0.03125;
+      return;
+    }
+
+    // progress is at 1 and the screen is fully drawn. Hold it: the WebAssembly build
+    // has to fetch 8.9 MB of wasm plus 3.7 MB of asset data, and the original got
+    // this for free because execute_shell() started an already-loaded process.
+    if (!this.launched) {
+      if (!this.target) return;
+      if (this.hold < this.holdFrames) { this.hold++; return; }
+      this.goWindowed();
+      if (!this.launch()) {
+        // Popup refused, so there is nowhere to show the game. Go back to the menu.
+        background.displayMessage("The game window was blocked. Allow pop-ups for this page.");
+        this.slideOut = 1;
+      } else {
+        this.launched = 1;
+      }
+      return;
+    }
+
+    // execute_wait: the launcher blocks for as long as the game runs and only
+    // continues once the game is gone.
+    if (this.gameWindow && this.gameWindow.closed) {
+      this.goFullscreen();
+      this.slideOut = 1;
+      return;
+    }
+
+    // close_on_launch skips the wait: timer(game_end, 150) closes the launcher 150
+    // frames after the game starts. That count has to begin when the game is actually
+    // up, not when this room was created - in the original launch_game fires on frame
+    // 120 and game_end on 150, but the WebAssembly build needs the hold above first.
+    //
+    // A browser tab cannot close itself unless script opened it, and this one was
+    // not, so ending here would strand the player on a launch screen with no way
+    // out. Go back to the menu instead and say why.
+    if (this.closeOnLaunch) {
+      if (this.waitFrames < 150) { this.waitFrames++; return; }
+      background.displayMessage("A browser tab can't close itself, so the launcher stays open. Close the game window to come back.");
+      this.slideOut = 1;
+    }
   },
 
   draw() {
@@ -731,31 +816,47 @@ async function runGame() {
   startGame.create();
 }
 
-// The game runs in a frame on top of the launcher canvas, so the address bar keeps
-// showing the launcher's own URL. The frame is only created once the launch screen
-// has played out, and the launcher's main loop stops while it is up so the two do
-// not both fight for the keyboard.
-function mountGameFrame(url) {
-  if (app.gameFrame) return;
-  app.gameFrame = document.createElement("iframe");
-  app.gameFrame.src = url;
-  app.gameFrame.title = "SM64Plus";
-  app.gameFrame.allow = "autoplay; fullscreen; gamepad";
-  app.gameFrame.setAttribute("tabindex", "0");
-  Object.assign(app.gameFrame.style, {
-    position: "fixed",
-    inset: "0",
-    width: "100%",
-    height: "100%",
-    border: "0",
-    background: "#000",
-    zIndex: "10"
-  });
-  document.body.appendChild(app.gameFrame);
-  app.runningGame = true;
-  // The game owns the keyboard from here on; the launcher's step/draw loops stand down.
-  app.gameFrame.focus();
+// execute_shell() (obj_start_game/Create_0.gml:17) starts the game as a detached
+// process; execute_shell(..., _wait) additionally blocks until it exits. A popup
+// window is the browser's equivalent of that detached process, and watching it close
+// is the equivalent of execute_wait returning.
+//
+// It has to be opened here, synchronously, while the keypress that chose "Start
+// Game" is still the current user gesture. The original gets away with a plain timer
+// because there is no popup blocker; opening one five seconds later from a timer is
+// refused. So the window is created blank and navigated later, once the launch screen
+// has played out.
+function openGameWindow() {
+  const width = 900;
+  const height = 600;
+  const left = window.screenX + (window.outerWidth - width) / 2;
+  const top = window.screenY + (window.outerHeight - height) / 2;
+  const features = `width=${width},height=${height},left=${Math.round(left)},top=${Math.round(top)}`
+    + ",menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=no";
+  let win = null;
+  try {
+    win = window.open("about:blank", "sm64plus-game", features);
+  } catch {
+    win = null;
+  }
+  if (!win) return null;
+  try {
+    // A blank white window for five seconds would look broken, so it says what it is.
+    win.document.title = "SM64Plus";
+    win.document.documentElement.style.background = "#000";
+    win.document.body.style.cssText = "margin:0;background:#000;height:100vh;display:flex;"
+      + "align-items:center;justify-content:center;color:#8a8a8a;"
+      + "font:12px ui-monospace,Menlo,monospace";
+    win.document.body.textContent = "Starting...";
+  } catch {
+    // Cross-origin: leave it blank rather than failing the launch.
+  }
+  return win;
 }
+
+// The game used to run in a frame laid over the launcher canvas, which stopped the
+// launcher's loop and left no way back to it. It now opens as its own window, which
+// is what execute_shell() does, so nothing here draws over the launcher any more.
 
 async function checkLauncherUpdates() {
   background.displayMessage("Checking GitHub for launcher updates...");
@@ -1378,6 +1479,8 @@ function loadItemStates() {
       if (item.internal_name === "window_height") app.launcher.window_height = item.state;
       if (item.internal_name === "fullscreen") app.launcher.fullscreen = item.state;
       if (item.internal_name === "quick_launch") app.launcher.quick_launch = item.state;
+      // obj_start_game reads this to decide whether execute_shell waits.
+      if (item.internal_name === "close_on_launch") app.launcher.close_on_launch = item.state;
     }
   }
   app.customTextures = app.data.state.customTextures ?? true;
@@ -1491,10 +1594,6 @@ function drawBuildScreen() {
 }
 
 function draw() {
-  // Once the game frame is up it owns the screen and the input; keep drawing behind
-  // it only so the canvas is still current if the frame is ever torn down.
-  if (app.runningGame) return;
-
   renderer.begin(COLOR.black);
   drawBackground();
 
@@ -1517,20 +1616,16 @@ function frame(now) {
   const delta = Math.min(100, now - last);
   last = now;
 
-  // The game runs in its own frame with its own animation loop, so the launcher stops
-  // stepping and drawing here. renderer.frames is advanced inside the branch below
-  // rather than in tick(), so it does not creep while the game is in front.
-  if (!app.runningGame) {
-    accumulator += delta;
-    while (accumulator >= STEP) {
-      accumulator -= STEP;
-      tick();
-    }
-    draw();
-  } else {
-    last = now;
-    accumulator = 0;
+  // The game has its own window and its own animation loop, so the launcher simply
+  // keeps running behind it - which is what execute_shell() does in the original. It
+  // stays on the launch screen, frozen at progress 1, for as long as the game is up:
+  // the original is blocked inside execute_wait during exactly that time.
+  accumulator += delta;
+  while (accumulator >= STEP) {
+    accumulator -= STEP;
+    tick();
   }
+  draw();
   requestAnimationFrame(frame);
 }
 
@@ -1541,9 +1636,8 @@ let stepFrames = 0;
 function tick() {
   stepFrames++;
   renderer.frames = stepFrames;
-  // Key events belong to the game once its frame is up, so the launcher's own
-  // input layer stops consuming them.
-  if (app.runningGame) return;
+  // Key events belong to the game window while it is up, and that window has focus,
+  // so the launcher's own input layer sees nothing and needs no gating here.
   input.tick();
   background.step();
   // input_check_pressed() is per step: hold counters advance here, presses are cleared at the end
@@ -1815,6 +1909,6 @@ function applyLauncherWindow() {
   // thing the real launcher shows, and it is the room that hands over to the menu.
   app.ready = true;
   // handy for poking at the state from the console
-  window.__launcher = { app, boot, titleMenu, settings, background, renderer, input };
+  window.__launcher = { app, boot, startGame, titleMenu, settings, background, renderer, input };
   requestAnimationFrame((now) => { last = now; frame(now); });
 })();
