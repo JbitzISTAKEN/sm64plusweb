@@ -229,7 +229,8 @@ function letterList() {
 }
 
 async function currentState() {
-  const exe = exePath();
+  const build = gameBuildEntry();
+  const exe = build?.exe ?? null;
   const config = launcherConfig();
   const builtVersion = config.version;
   return {
@@ -241,8 +242,9 @@ async function currentState() {
     letters: letterList(),
     gameVersion: gameVersion(),
     repoPresent: exists(path.join(REPO_DIR, ".git")),
-    gameBuilt: !!exe,
+    gameBuilt: !!build,
     builtExe: exe ? path.basename(exe) : null,
+    buildKind: build?.kind ?? null,
     romPresent: exists(ROM_FILE),
     romPath: ROM_FILE,
     customTextures: config.customTextures,
@@ -296,8 +298,7 @@ function launchGame({ copyGfx = true } = {}) {
   // The WebAssembly build runs in the browser, so it is served from /game/ rather
   // than spawned. It reads the very settings.ini the launcher has been writing all
   // along, which is handed over through the session map below.
-  const wasmEntry = path.join(WASM_DIR, "index.html");
-  if (exists(wasmEntry)) {
+  if (gameBuildEntry()?.kind === "wasm") {
     const handoff = { at: Date.now(), ini: readTextOr(SETTINGS_INI) || "" };
     pendingLaunch = handoff;
     // /game/ rather than /game/index.html: the page is served at that path, so the
@@ -679,6 +680,19 @@ async function serveStatic(req, res, url) {
 }
 
 // ---------------------------------------------------------------- server
+
+// check_file() (obj_init/Create_0.gml) asks whether the game the launcher is about to
+// start actually exists, and that answer drives both the quick launch on the
+// disclaimer screen and the build prompt. In the browser port the game is the
+// WebAssembly build, not the native executable, so asking only exePath() reported
+// "not built" while launchGame() was perfectly able to start it - which silently
+// disabled quick launch. Both the check and the launch ask this one question.
+function gameBuildEntry() {
+  const exe = exePath();
+  if (exe) return { kind: "native", exe };
+  if (exists(path.join(WASM_DIR, "index.html"))) return { kind: "wasm", exe: null };
+  return null;
+}
 
 const server = http.createServer(async (req, res) => {
   // Inside the try, deliberately. A request target like "//" is a protocol-relative

@@ -1655,7 +1655,23 @@ async function enterMenu() {
   if (state) app.data.state = state;
   titleMenu.create();
   app.screen = "menu";
-  if (app.launcher.quick_launch && state?.gameBuilt) {
+  // check_file() (obj_init/Create_0.gml:48):
+  //
+  //   if (global.quick_launch && !input_check_pressed(input.del)) {
+  //       instance_create_depth(0, 0, depth-1, obj_start_game);
+  //   } else {
+  //       slide_out = 1;
+  //   }
+  //
+  // So holding Delete skips the quick launch and lands on the menu instead. That is
+  // the same expression the original evaluates on the frame the key went down, and
+  // boot.externalEnabled is where Step_0.gml:20 already stored it:
+  //
+  //   external_enabled = !input_check_pressed(input.del);
+  //
+  // It has to be read from there rather than from the input state now, because by the
+  // time the slide-out finishes the key has usually been released again.
+  if (app.launcher.quick_launch && boot.externalEnabled && state?.gameBuilt) {
     background.displayMessage("Quick launch is on, starting the game...");
     setTimeout(runGame, 400);
   }
