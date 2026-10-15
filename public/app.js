@@ -782,16 +782,24 @@ const startGame = {
       return;
     }
 
-    // close_on_launch skips the wait: timer(game_end, 150) closes the launcher 150
-    // frames after the game starts. That count has to begin when the game is actually
-    // up, not when this room was created - in the original launch_game fires on frame
-    // 120 and game_end on 150, but the WebAssembly build needs the hold above first.
+    // close_on_launch skips the wait and ends the launcher instead. The three timers
+    // are relative to the room being created:
+    //
+    //   if (global.close_on_launch) timer(game_end, 150);
+    //   var _time = global.close_on_launch ? 105 : 45;
+    //   timer(go_windowed, _time);
+    //   timer(launch_game, _time + 15);
+    //
+    // So with close_on_launch on, the game starts on frame 120 and the launcher ends
+    // on frame 150 - 30 frames later. That count has to begin when the game is
+    // actually up rather than when the room was created, because the WebAssembly
+    // build needs the hold above first.
     //
     // A browser tab cannot close itself unless script opened it, and this one was
     // not, so ending here would strand the player on a launch screen with no way
     // out. Go back to the menu instead and say why.
     if (this.closeOnLaunch) {
-      if (this.waitFrames < 150) { this.waitFrames++; return; }
+      if (this.waitFrames < 30) { this.waitFrames++; return; }
       background.displayMessage("A browser tab can't close itself, so the launcher stays open. Close the game window to come back.");
       this.slideOut = 1;
     }
