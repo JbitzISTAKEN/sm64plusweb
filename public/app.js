@@ -1003,10 +1003,15 @@ const settings = {
         loadPreset(kind, list[this.selectedOption]);
       }
     }
-    if (input.holdTime("select") === 20 && this.selectedOption < list.length) {
+    // Only presets_page (the game PRESETS tab) has a hold-select action, and it
+    // widens the load to the system categories as well:
+    //   if (input_check_hold_time(input.select) == 120) { ... }
+    // input_presets_page has no such branch - an input preset only ever covers the
+    // input categories. Hold times are in frames (scr_input.gml:188).
+    if (kind === "game" && input.holdTime("select") === 120 && this.selectedOption < list.length) {
       loadPreset(kind, list[this.selectedOption], true);
     }
-    if (input.holdTime("del") === 20 && this.selectedOption < list.length) {
+    if (input.holdTime("del") === 60 && this.selectedOption < list.length) {
       deletePreset(kind, list[this.selectedOption]);
     }
     changeSelectedOption(this, total, this.optionsPerPage() - 2, Math.round(this.xGo) === this.selectedTab, this.selectedTab - 2);
@@ -1269,7 +1274,24 @@ async function loadPreset(kind, preset, all = false) {
     const { data } = await api.send("/api/preset-file", { kind, name: preset.file, internal: preset.internal });
     if (data.error) throw new Error(data.error);
     const ini = new Ini(data.text);
-    const indexes = all ? [...app.ranges.system, ...app.ranges.gameConfig] : app.ranges.gameConfig;
+
+    // Which categories the preset applies to, per the original:
+    //
+    //   input_presets_page (Create_0.gml:263)
+    //     load_settings_range(_option, category_count - 3, category_count - 1, true)
+    //   presets_page (Create_0.gml:190/199)
+    //     load_settings_range(_option, 2, category_count - 4, true)        tap
+    //     load_settings_range(_option, 0, category_count - 4, false)       hold select
+    //
+    // So an input preset is read against the last three categories - the three input
+    // mapping ones - and never against the game settings. Holding select on the game
+    // PRESETS tab additionally covers the system categories (0 and 1).
+    const indexes = kind === "input"
+      ? app.ranges.input
+      : all
+        ? [...app.ranges.system, ...app.ranges.gameConfig]
+        : app.ranges.gameConfig;
+
     for (const index of indexes) {
       const category = app.categories[index];
       if (!category) continue;
@@ -1278,8 +1300,10 @@ async function loadPreset(kind, preset, all = false) {
       });
     }
     scheduleSave();
-    background.displayMessage(all ? "Loaded all the settings!" : "Loaded the settings!");
-    sfxPlay(all ? "start" : "select");
+    background.displayMessage(kind === "input"
+      ? "Loaded the input settings!"
+      : all ? "Loaded all the settings!" : "Loaded the settings!");
+    sfxPlay(kind === "input" ? "select" : all ? "start" : "select");
   } catch {
     background.displayMessage("Couldn't read that preset.");
   }
