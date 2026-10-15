@@ -8,6 +8,13 @@ html, body {
   cursor: default;
 }
 
+/* window_set_cursor(fullscreen ? cr_none : cr_default) from set_fullscreen()
+   (scr_categories_and_options.gml:313). */
+body.fullscreen,
+body.fullscreen #screen {
+  cursor: none;
+}
+
 #screen {
   display: block;
   width: 100vw;

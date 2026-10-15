@@ -1252,6 +1252,7 @@ function changeOptionState(option, horizontal, longHorizontal) {
   }
   if (option.internal_name === "music_volume") app.launcher.music_volume = option.state;
   if (option.internal_name === "sound_volume") app.launcher.sfx_volume = option.state;
+  if (option.internal_name === "fullscreen") setFullscreen(!!option.state);
   if (["scaling_mode", "window_width", "window_height", "fullscreen"].includes(option.internal_name)) applyLauncherWindow();
   scheduleSave();
 }
@@ -1573,11 +1574,42 @@ setInterval(async () => {
 
 // --- input events -------------------------------------------------------------
 
+// Alt+Enter. obj_persistent/Step_1.gml:11-27 toggles the window, plays snd_select,
+// persists it and pushes the value back into the launcher's fullscreen option so
+// the menu never disagrees with the actual window.
+function toggleFullscreenHotkey() {
+  const next = !app.launcher.fullscreen;
+  setFullscreen(next);
+  sfxPlay("select");
+  const item = app.launcherCategory?.items?.find((i) => i.internal_name === "fullscreen");
+  if (item) item.state = next;
+  scheduleSave();
+  applyLauncherWindow();
+}
+
 window.addEventListener("keydown", (event) => {
   if (!app.ready) return;
   if (event.code === "F5") return;
   if (event.code === "PageUp" || event.key === "PageUp") { pressAction("page_left"); event.preventDefault(); return; }
   if (event.code === "PageDown" || event.key === "PageDown") { pressAction("page_right"); event.preventDefault(); return; }
+
+  // Hotkeys. obj_persistent/Step_1.gml:2 ignores the whole input system while Alt
+  // is held and hands the key to these instead:
+  //
+  //   if (!keyboard_check(vk_alt)) input_system_update()
+  //   else { if (keyboard_check_pressed(vk_enter)) { set_fullscreen(!global.fullscreen); ... } }
+  //
+  // Enter then sets fullscreen, plays snd_select, writes LAUNCHER/fullscreen and
+  // pushes the new value back into the launcher's own option.
+  if (event.altKey) {
+    if (event.code === "Enter" || event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleFullscreenHotkey();
+      return;
+    }
+    return; // Alt swallows the input system for this key
+  }
 
   const action = actionFor(event);
   if (!action) {
@@ -1682,9 +1714,52 @@ function openSettings(section) {
 }
 
 // window_set_size() from the original: the launcher's own window size drives the room.
+// set_fullscreen() (scr_categories_and_options.gml:308):
+//
+//   function set_fullscreen(fullscreen) {
+//       global.fullscreen = fullscreen;
+//       window_set_fullscreen(global.fullscreen)
+//       window_set_cursor(global.fullscreen ? cr_none : cr_default);
+//   }
+//
+// So the option does two things: it puts the window in fullscreen and it hides the
+// cursor. Both are wanted here. The browser only grants requestFullscreen() from
+// inside a user gesture, so the call at startup (gml line 415, which applies the
+// stored setting) cannot take effect on load - the option still reads back the way
+// the player set it, and the first keypress or click inside the page will do it.
+async function setFullscreen(state) {
+  app.launcher.fullscreen = state;
+  // window_set_cursor(fullscreen ? cr_none : cr_default)
+  document.body.classList.toggle("fullscreen", state);
+  try {
+    if (state && !document.fullscreenElement) await document.documentElement.requestFullscreen();
+    else if (!state && document.fullscreenElement) await document.exitFullscreen();
+  } catch {
+    // Blocked without a gesture, or the user dismissed the browser's own prompt.
+    // Nothing to do about it here; fullscreenchange below keeps the two in sync.
+  }
+}
+
+// Leaving fullscreen with Escape does not go through the settings menu, so the
+// option has to be corrected from the event instead. obj_persistent/Step_1.gml does
+// the same job when Alt+Enter toggles the window behind the menu's back.
+document.addEventListener("fullscreenchange", () => {
+  const on = !!document.fullscreenElement;
+  if (app.launcher.fullscreen === on) return;
+  app.launcher.fullscreen = on;
+  document.body.classList.toggle("fullscreen", on);
+  const item = app.launcherCategory?.items?.find((i) => i.internal_name === "fullscreen");
+  if (item) item.state = on;
+  scheduleSave();
+  applyLauncherWindow();
+});
+
 function applyLauncherWindow() {
-  const width = app.launcher.window_width || 1280;
-  const height = app.launcher.window_height || 720;
+  // obj_persistent/Step_1.gml:72 takes the view size from the display while
+  // fullscreen, and from the launcher window otherwise.
+  const fullscreen = app.launcher.fullscreen && document.fullscreenElement;
+  const width = fullscreen ? window.innerWidth : (app.launcher.window_width || 1280);
+  const height = fullscreen ? window.innerHeight : (app.launcher.window_height || 720);
   renderer.resize(app.launcher.scaling_mode, width, height);
 }
 
@@ -1718,6 +1793,14 @@ function applyLauncherWindow() {
       placeholder(), placeholder(), "spr_void", "spr_void", placeholder()];
 
   loadItemStates();
+  // scr_categories_and_options.gml:415 applies the stored setting on load:
+  //
+  //   set_fullscreen(launcher_get_item_state("fullscreen", false));
+  //
+  // A browser will not grant requestFullscreen() outside a user gesture, so this
+  // cannot take effect on load. The cursor half still does, and the first keypress
+  // or click in the page completes it.
+  if (app.launcher.fullscreen) setFullscreen(true);
   applyLauncherWindow();
 
   // The game's own textures, if it has been built already.
