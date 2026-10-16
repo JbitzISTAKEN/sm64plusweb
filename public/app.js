@@ -653,6 +653,7 @@ const startGame = {
     this.hold = 0;
     this.frame = 0;
     this.waitFrames = 0;
+    this.loaded = 0;
     this.launched = 0;
     this.closed = 0;
     app.screen = "start";
@@ -714,15 +715,17 @@ const startGame = {
     }
   },
 
+  // Puts the game into the still-hidden window as soon as the server has answered, so
+    // it loads during the launch screen instead of after it.
+loadGame() {
+    if (this.loaded || !this.gameWindow || !this.target) return;
+    if (loadIntoGameWindow(this.gameWindow, this.target)) this.loaded = 1;
+  },
+
+  // Brings the window on screen once the launch screen has played.
   launch() {
     if (!this.gameWindow) return false;
-    if (!showGameWindow(this.gameWindow)) return false;
-    try {
-      this.gameWindow.location = this.target;
-    } catch {
-      return false;
-    }
-    return true;
+    return showGameWindow(this.gameWindow);
   },
 
   // obj_start_game/Step_0.gml once the game has gone:
@@ -761,7 +764,7 @@ const startGame = {
     // has to fetch 8.9 MB of wasm plus 3.7 MB of asset data, and the original got
     // this for free because execute_shell() started an already-loaded process.
     if (!this.launched) {
-      if (!this.target) return;
+      this.loadGame();
       if (this.hold < this.holdFrames) { this.hold++; return; }
       this.goWindowed();
       if (!this.launch()) {
@@ -835,23 +838,36 @@ async function runGame() {
 // refused. So the window is created blank and navigated later, once the launch screen
 // has played out.
 function openGameWindow() {
-  // A popup has to be opened inside the gesture that pressed Start Game, or the
-  // browser refuses it - and the original gets away with a plain timer because there
-  // is no popup blocker. So the window is created here, off-screen and 1x1, and only
-  // sized and positioned once the launch screen has played out. Nothing of it is
-  // visible until then: the player sees the launch screen, then the game window.
+  // A browser only lets a popup be opened inside a user gesture, and the five second
+  // launch screen is not one - so the window has to exist before the timer finishes.
+  // The original gets away with a plain timer only because there is no popup blocker.
+  //
+  // So it is created 1x1 and pushed far off-screen, then the game is loaded straight
+  // into it while nobody can see it. By the time the launch screen ends it has been
+  // sitting on /game/ for most of the five seconds, so when showGameWindow() brings
+  // it on screen the game is already up rather than starting from a blank page.
   let win = null;
   try {
     win = window.open("about:blank", "sm64plus-game",
-      "width=1,height=1,left=-2000,top=-2000,menubar=no,toolbar=no,location=no,status=no");
+      "width=1,height=1,left=-32000,top=-32000,menubar=no,toolbar=no,location=no,status=no");
   } catch {
     win = null;
   }
   return win;
 }
 
-// Sized and centred here rather than at creation, so the off-screen 1x1 window the
-// gesture had to open is still off-screen while the launch screen plays.
+// Loads the game into the hidden window without revealing it.
+function loadIntoGameWindow(win, url) {
+  try {
+    win.location = url;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Brings it on screen, sized and centred. Only called once the launch screen has
+// played, so nothing of the game is on screen before then.
 function showGameWindow(win) {
   const width = 450;
   const height = 337.5;
