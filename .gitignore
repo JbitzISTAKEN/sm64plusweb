@@ -2,10 +2,12 @@ node_modules/
 .DS_Store
 *.log
 
-# Local checkout of the game repository, if one is used for assets
-game/
-textures/
-build/
+# Local checkout of the game repository, if one is used for assets.
+# Anchored to the root: an unanchored "game/" also matched public/game/, which is
+# the WebAssembly build and does need to be committed.
+/game/
+/textures/
+/build/
 
 # The WebAssembly build is committed on purpose now: the launcher is served as static
 # files from a CDN, so public/game/ has to be in the repository for the game to load.
