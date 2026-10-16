@@ -706,9 +706,8 @@ const server = http.createServer(async (req, res) => {
       await handleApi(req, res, url);
     } else if (url.pathname === "/game" || url.pathname === "/game/") {
       // /game/ serves the page itself rather than redirecting to /game/index.html,
-      // so the launcher's query string (?menu=1 and friends) survives the handoff
-      // and the game runs at /game/?menu=1. Relative asset URLs still resolve,
-      // because the document's base directory is /game/ either way.
+      // so the launcher keeps its own URL and the game runs at /game/. Relative asset
+      // URLs still resolve, because the document's base directory is /game/ either way.
       await sendWasmFile(res, "index.html");
     } else if (url.pathname.startsWith("/game/")) {
       // The WebAssembly build.

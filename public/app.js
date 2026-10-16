@@ -1913,8 +1913,8 @@ function applyLauncherWindow() {
 
   boot.create();
   app.screen = "boot";
-  // ?menu=1 no longer skips rm_init. The disclaimer still plays; it is the first
-  // thing the real launcher shows, and it is the room that hands over to the menu.
+  // The disclaimer plays on every load. It is the first thing the real launcher shows,
+  // and rm_init is the room that hands over to the menu.
   app.ready = true;
   // handy for poking at the state from the console
   window.__launcher = { app, boot, startGame, titleMenu, settings, background, renderer, input };

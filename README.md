@@ -99,11 +99,12 @@ Settings are written in the game's own format into the real save folder
 (`~/Library/Application Support/SM64Plus`, `%LOCALAPPDATA%\SM64Plus`, `~/.local/share/SM64Plus`),
 so the game reads them.
 
-## Reaching the menu without a build
+## Reaching the menu
 
-The original launcher only leaves the boot room once `build/us_pc/sm64.us` exists, so a fresh clone
-starts at the disclaimer, asks for the ROM and builds. `?menu=1` (`http://localhost:7357/?menu=1`)
-skips that and opens the main menu directly, which is handy for looking at the UI.
+`http://localhost:7357/` is the only link. The original launcher only leaves the boot room once
+`build/us_pc/sm64.us` exists and otherwise walks the player through downloading MSYS2 and picking a
+ROM. There is no native build step here — the WebAssembly build is served from `/game/` — so the
+disclaimer plays and then slides straight into the menu, whatever `check_file()` reports.
 
 ## Building on macOS
 
