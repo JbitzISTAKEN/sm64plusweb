@@ -653,7 +653,6 @@ const startGame = {
     this.hold = 0;
     this.frame = 0;
     this.waitFrames = 0;
-    this.loaded = 0;
     this.launched = 0;
     this.closed = 0;
     app.screen = "start";
@@ -672,9 +671,10 @@ const startGame = {
     // the detached process execute_shell() spawns, and waiting on it closing is the
     // equivalent of execute_wait returning.
     this.closeOnLaunch = !!app.launcher.close_on_launch;
-    // A popup has to be opened inside the gesture that pressed Start Game, so it is
-    // opened blank here and navigated to the game once the launch screen has played.
-    this.gameWindow = openGameWindow();
+    // Nothing is opened here. launch_game() runs on its own timer once the launch
+    // screen has played, and execute_shell() starts the process at that point - not
+    // when Start Game was pressed - so the window is opened then too.
+    this.gameWindow = null;
   },
 
   async finish() {
@@ -715,17 +715,13 @@ const startGame = {
     }
   },
 
-  // Puts the game into the still-hidden window as soon as the server has answered, so
-    // it loads during the launch screen instead of after it.
-loadGame() {
-    if (this.loaded || !this.gameWindow || !this.target) return;
-    if (loadIntoGameWindow(this.gameWindow, this.target)) this.loaded = 1;
-  },
-
-  // Brings the window on screen once the launch screen has played.
+  // launch_game(): opens the game window straight to its final size and position,
+  // with the game already in it. Nothing exists before this point - no about:blank,
+  // no offscreen placeholder, no late resize.
   launch() {
-    if (!this.gameWindow) return false;
-    return showGameWindow(this.gameWindow);
+    if (!this.target) return false;
+    this.gameWindow = openGameWindow(this.target);
+    return !!this.gameWindow;
   },
 
   // obj_start_game/Step_0.gml once the game has gone:
@@ -764,12 +760,11 @@ loadGame() {
     // has to fetch 8.9 MB of wasm plus 3.7 MB of asset data, and the original got
     // this for free because execute_shell() started an already-loaded process.
     if (!this.launched) {
-      this.loadGame();
       if (this.hold < this.holdFrames) { this.hold++; return; }
       this.goWindowed();
       if (!this.launch()) {
-        // Popup refused, so there is nowhere to show the game. Go back to the menu.
-        background.displayMessage("The game window was blocked. Allow pop-ups for this page.");
+        // A popup opened from a timer needs the site to be allowed to open them.
+        background.displayMessage("The browser blocked the game window. Allow pop-ups for this page.");
         this.slideOut = 1;
       } else {
         this.launched = 1;
@@ -837,55 +832,26 @@ async function runGame() {
 // because there is no popup blocker; opening one five seconds later from a timer is
 // refused. So the window is created blank and navigated later, once the launch screen
 // has played out.
-function openGameWindow() {
-  // A browser only lets a popup be opened inside a user gesture, and the five second
-  // launch screen is not one - so the window has to exist before the timer finishes.
-  // The original gets away with a plain timer only because there is no popup blocker.
-  //
-  // So it is created 1x1 and pushed far off-screen, then the game is loaded straight
-  // into it while nobody can see it. By the time the launch screen ends it has been
-  // sitting on /game/ for most of the five seconds, so when showGameWindow() brings
-  // it on screen the game is already up rather than starting from a blank page.
+function openGameWindow(url) {
+  // execute_shell() (obj_start_game/Create_0.gml:17) starts the game as its own
+  // window, at its final size, centred over the launcher - and only once the launch
+  // screen has finished, which is what launch_game()'s timer does. So this opens
+  // straight to that, already carrying the game. There is no earlier window, no blank
+  // page and nothing to resize afterwards.
+  const width = 450;
+  const height = 337.5;
+  const left = window.screenX + (window.outerWidth - width) / 2;
+  const top = window.screenY + (window.outerHeight - height) / 2;
+  const features = `width=${width},height=${height},left=${Math.round(left)},top=${Math.round(top)}`
+    + ",menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=no";
   let win = null;
   try {
-    win = window.open("about:blank", "sm64plus-game",
-      "width=1,height=1,left=-32000,top=-32000,menubar=no,toolbar=no,location=no,status=no");
+    win = window.open(url, "sm64plus-game", features);
   } catch {
     win = null;
   }
   return win;
 }
-
-// Loads the game into the hidden window without revealing it.
-function loadIntoGameWindow(win, url) {
-  try {
-    win.location = url;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Brings it on screen, sized and centred. Only called once the launch screen has
-// played, so nothing of the game is on screen before then.
-function showGameWindow(win) {
-  const width = 450;
-  const height = 337.5;
-  const left = window.screenX + (window.outerWidth - width) / 2;
-  const top = window.screenY + (window.outerHeight - height) / 2;
-  try {
-    win.resizeTo(width, height);
-    win.moveTo(Math.round(left), Math.round(top));
-    win.focus();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// The game used to run in a frame laid over the launcher canvas, which stopped the
-// launcher's loop and left no way back to it. It now opens as its own window, which
-// is what execute_shell() does, so nothing here draws over the launcher any more.
 
 async function checkLauncherUpdates() {
   background.displayMessage("Checking GitHub for launcher updates...");
