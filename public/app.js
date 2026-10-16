@@ -30,22 +30,238 @@ const VERSION = LAUNCHER_VERSION;
 const wait = (duration, offset = 0) => (stepFrames + offset) % duration < 1;
 
 // --- api ---------------------------------------------------------------------
+//
+// Static build. Everything the Node server used to provide - the option lists, the
+// presets, the settings file, the launch handoff - comes from files under public/data
+// and from localStorage instead, so the launcher runs from a CDN with no backend at
+// all. The interface is deliberately the same shape the server used, so the call
+// sites below are unchanged.
+//
+// settings.ini's key is the one wasm/index.html already falls back to
+// (RAW_INI_KEY), which is how the game picks the player's settings up on boot.
+
+const STORE = {
+  settings: "sm64plus.web.settings.ini",
+  launcherSettings: "sm64plus.web.launcherSettings.ini",
+  launcherConfig: "sm64plus.web.launcherConfig.ini",
+  presets: "sm64plus.web.presets",
+  inputPresets: "sm64plus.web.inputPresets"
+};
+
+function lsGet(key, fallback = "") {
+  try { const v = localStorage.getItem(key); return v === null ? fallback : v; } catch { return fallback; }
+}
+function lsSet(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* private mode, quota - settings just won't persist */ }
+}
+function lsJson(key, fallback) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+}
+function lsSetJson(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* as above */ }
+}
+
+async function fetchData(path) {
+  const res = await fetch(path, { cache: "no-cache" });
+  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+  return res;
+}
+async function fetchJson(path) {
+  return (await fetchData(path)).json();
+}
+
+// configfile_load() stores whatever it reads, so a bind the launcher never assigned,
+// written as 0, does not mean "unset" - it means "bound to button 0". The real
+// defaults ship in the game's own launcher/input_presets/Default.ini (button_a = 2,
+// key_b = 51, ...). Every zero in those three sections is a row the player never
+// touched, so it is filled from that preset rather than dropped: their own binds win,
+// and anything that is 0 in Default.ini too stays 0, which is genuinely unbound.
+//
+// The server used to do this on the way out of /api/launch-handoff. There is no server
+// here, so it happens as the file is written.
+let defaultBindingsPromise = null;
+function defaultBindings() {
+  if (!defaultBindingsPromise) {
+    defaultBindingsPromise = fetch("data/inputPresets/Default.ini", { cache: "no-cache" })
+      .then((r) => (r.ok ? r.text() : ""))
+      .catch(() => "");
+  }
+  return defaultBindingsPromise;
+}
+
+const BINDING_SECTIONS = new Set(["CONTROLLER MAPPING", "KEYBOARD MAPPING", "MOUSE"]);
+
+async function fillUnsetBindings(text, defaults) {
+  if (!text || !defaults) return text || "";
+  const wanted = new Map();     // section -> Map(key -> value)
+  let section = "";
+  for (const line of defaults.split(/\r?\n/)) {
+    const header = line.match(/^\s*\[(.+?)\]\s*$/);
+    if (header) { section = header[1]; continue; }
+    const kv = line.match(/^\s*(\w+)\s*=\s*"?([^"]*)"?\s*$/);
+    if (kv && section && kv[2] !== "0") {
+      if (!wanted.has(section)) wanted.set(section, new Map());
+      wanted.get(section).set(kv[1], kv[2]);
+    }
+  }
+
+  const out = [];
+  section = "";
+  for (const line of text.split(/\r?\n/)) {
+    const header = line.match(/^\s*\[(.+?)\]\s*$/);
+    if (header) { section = header[1]; out.push(line); continue; }
+    const kv = line.match(/^(\s*)(\w+)(\s*=\s*)"?([^"]*)"?(\s*)$/);
+    if (kv && BINDING_SECTIONS.has(section) && kv[4] === "0") {
+      const fallback = wanted.get(section)?.get(kv[2]);
+      if (fallback !== undefined) {
+        out.push(`${kv[1]}${kv[2]}${kv[3]}"${fallback}"${kv[5]}`);
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+let bootstrapPromise = null;
+
+// The stored categories are unfiltered, exactly as categories.json has them. The
+// server used to do filterForPlatform() against its own process.platform, which on a
+// CDN would have baked in the build machine's OS - the internal_resolution option is
+// OS_WINDOWS and would have been missing for everyone else. Filtering here, against
+// the browser's own platform, keeps delete_categories() behaving as it does on the
+// desktop. It is worth 2 items: 156 on macOS and Linux, 158 on Windows.
+function browserPlatform() {
+  const p = (navigator.userAgentData?.platform || navigator.platform || "").toLowerCase();
+  if (p.includes("win")) return "win32";
+  if (p.includes("mac")) return "darwin";
+  return "linux";
+}
+
+function bootstrapData() {
+  if (!bootstrapPromise) {
+    bootstrapPromise = fetchJson("data/bootstrap.json").then((data) => {
+      const platform = browserPlatform();
+      const categories = filterForPlatform(data.categoriesRaw, platform);
+      const launcherCategory = filterForPlatform([data.launcherCategoryRaw], platform)[0];
+      data.categories = categories;
+      data.launcherCategory = launcherCategory;
+      data.ranges = categoryRanges(categories.length);
+      return data;
+    });
+  }
+  return bootstrapPromise;
+}
+
+// The user's own presets, as { file, name, description, text } keyed by file name.
+function userPresets(kind) {
+  const key = kind === "input" ? STORE.inputPresets : STORE.presets;
+  const list = lsJson(key, {});
+  return Array.isArray(list) ? list : Object.values(list || {});
+}
 
 const api = {
   async get(route) {
-    const res = await fetch(route, { cache: "no-store" });
-    if (!res.ok) throw new Error(`${route} -> ${res.status}`);
-    return res.json();
+    const url = new URL(route, location.href);
+    if (url.pathname === "/api/bootstrap") return bootstrapData();
+    if (url.pathname === "/api/state") {
+      const data = await bootstrapData();
+      return {
+        platform: navigator.platform,
+        gameBuilt: true,
+        sprites: data.state.sprites,
+        letters: data.state.letters,
+        launcherVersion: data.state.launcherVersion,
+        customTextures: true
+      };
+    }
+    if (url.pathname === "/api/presets") {
+      const kind = url.searchParams.get("kind") === "input" ? "input" : "game";
+      const data = await bootstrapData();
+      const builtIn = (kind === "input" ? data.inputPresets : data.presets)
+        .map((p) => ({ name: p.name, file: p.file, description: p.description, internal: true }));
+      const mine = userPresets(kind)
+        .map((p) => ({ name: p.name, file: p.file, description: p.description || "", internal: false }));
+      return { presets: [...builtIn, ...mine] };
+    }
+    // Nothing below exists on a static host: there is no native build to drive and no
+    // launcher repository to update. The menu entries that use these are hidden.
+    if (url.pathname === "/api/build/log") return { logs: [], running: false };
+    throw new Error(`no static route for ${route}`);
   },
+
   async send(route, body, method = "POST") {
-    const res = await fetch(route, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body ?? {})
-    });
-    return { ok: res.ok, status: res.status, data: await res.json().catch(() => ({})) };
+    const payload = body ?? {};
+    const ok = (data) => ({ ok: true, status: 200, data });
+
+    if (route === "/api/ini") {
+      const key = STORE[payload.name] ?? STORE.settings;
+      let text = payload.text || "";
+      if (payload.name === "settings") {
+        text = await fillUnsetBindings(text, await defaultBindings());
+      }
+      lsSet(key, text);
+      // Keep the in-memory copy in step so loadItemStates() and buildIni() see it.
+      if (app.data?.ini) app.data.ini[payload.name] = text;
+      return ok({ saved: true });
+    }
+
+    if (route === "/api/launch") {
+      // The game is the static WASM build next to this page. Nothing is spawned, so
+      // this only records that a launch happened.
+      return ok({ launched: true, mode: "wasm", url: "game/" });
+    }
+
+    if (route === "/api/preset-file") {
+      const dir = payload.kind === "input" ? "inputPresets" : "presets";
+      const mine = userPresets(payload.kind).find((p) => p.file === payload.name);
+      if (mine) return ok({ text: mine.text || "" });
+      const res = await fetch(`data/${dir}/${encodeURIComponent(payload.name)}`, { cache: "no-cache" });
+      if (!res.ok) return { ok: false, status: res.status, data: { error: "Couldn't read that preset." } };
+      return ok({ text: await res.text() });
+    }
+
+    if (route === "/api/presets") {
+      const kind = payload.kind === "input" ? "input" : "game";
+      const key = kind === "input" ? STORE.inputPresets : STORE.presets;
+      if (method === "DELETE") {
+        const list = userPresets(kind).filter((p) => p.file !== payload.name);
+        lsSetJson(key, list);
+        return ok({ deleted: true });
+      }
+      const list = userPresets(kind);
+      const file = `${payload.name}.ini`;
+      const entry = { file, name: payload.name, description: payload.description || "", text: payload.text || "" };
+      lsSetJson(key, [...list.filter((p) => p.file !== file), entry]);
+      return ok({ saved: true });
+    }
+
+    if (route === "/api/skyboxes") {
+      const manifest = await fetchJson("data/skyboxes/manifest.json");
+      const files = {};
+      await Promise.all(manifest.files.map(async (name) => {
+        const res = await fetch(`data/skyboxes/${name}`, { cache: "no-cache" });
+        if (res.ok) files[`gfx/${name}`] = await blobToBase64(await res.blob());
+      }));
+      return ok({ files, count: Object.keys(files).length, missing: [] });
+    }
+
+    // No native build on a static host.
+    return { ok: false, status: 501, data: { error: "Not available on a static host." } };
   }
 };
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const s = String(reader.result);
+      resolve(s.slice(s.indexOf(",") + 1));
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
 
 // --- input (scr_input.gml) ----------------------------------------------------
 
@@ -869,8 +1085,17 @@ function openGameWindow(url) {
 async function checkLauncherUpdates() {
   background.displayMessage("Checking GitHub for launcher updates...");
   try {
-    const update = await api.get("/api/launcher-updates");
-    background.displayMessage(`Launcher ${update.sha} (${new Date(update.date).toDateString()}): ${update.message}`);
+    // A plain GitHub API call, which is all the server ever did here.
+    const response = await fetch(
+      "https://api.github.com/repos/MorsGames/sm64plus-launcher/commits?per_page=1",
+      { headers: { "User-Agent": "sm64plus-launcher-web" } }
+    );
+    if (!response.ok) throw new Error(String(response.status));
+    const [commit] = await response.json();
+    background.displayMessage(
+      `Launcher ${commit.sha.slice(0, 8)} (${new Date(commit.commit.author.date).toDateString()}): `
+      + commit.commit.message.split("\n")[0]
+    );
   } catch {
     background.displayMessage("Couldn't reach GitHub.");
   }
@@ -1917,6 +2142,10 @@ function applyLauncherWindow() {
   // and rm_init is the room that hands over to the menu.
   app.ready = true;
   // handy for poking at the state from the console
-  window.__launcher = { app, boot, startGame, titleMenu, settings, background, renderer, input };
+  window.__launcher = {
+  app, boot, startGame, titleMenu, settings, background, renderer, input,
+  // handy for poking at the state from the console
+  api, saveSettings, scheduleSave, loadItemStates, openSettings
+};
   requestAnimationFrame((now) => { last = now; frame(now); });
 })();

@@ -114,42 +114,62 @@
   // The game drives its own frame loop via requestAnimationFrame; Emscripten
   // must not install one of its own or it will starve the game's.
   //
-  // The GameMaker launcher's settings.ini is held by the server, which snapshotted
-  // it at the moment Start Game was pressed. Emscripten's filesystem is in-memory,
-  // so the file is written into it in preRun, before the game's main() reads it.
+  // The GameMaker launcher's settings.ini. The launcher keeps it in localStorage under
+  // RAW_INI_KEY, which is the same file the game then reads. Emscripten's filesystem
+  // is in-memory, so it is written into it in preRun, before the game's main() reads it.
   var LAUNCHER_KEY = 'sm64plus.web.settings.v1';
 
-  // Read straight from the launcher's server rather than localStorage, so the
-  // options the player just changed are the ones the game boots with.
-  function fetchLauncherIni() {
-    return fetch('/api/launch-handoff', { cache: 'no-store' })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (j) { return j && j.ini && j.ini.trim() ? j.ini : null; })
-      .catch(function () { return null; });
-  }
+  // The four skyboxes (bidw, bitfs, bits, cake) are absent from this build's .data -
+  // 225 tiles. import_texture_custom() gets NULL from stbi_load() for each and falls
+  // back to the missing-texture swatch, so every level using one has a blank sky. They
+  // were regenerated with the upstream tools/skyconv and ship alongside the launcher as
+  // plain files, so they are fetched here and written into the filesystem in preRun.
+  // Paths are relative to this document, which is served at /game/.
+  var DATA_ROOT = '../data/skyboxes/';
 
-  // Four whole skyboxes (bidw, bitfs, bits, cake) are absent from this build's
-  // .data - 225 tiles. import_texture_custom() gets NULL from stbi_load() for each
-  // and falls back to the missing-texture swatch, so every level that uses one of
-  // them has a blank sky. The server regenerates them with the upstream tools/skyconv
-  // from the repo's own source PNGs and serves them here; they are written into the
-  // filesystem in preRun, before the game reads anything.
   function fetchSkyboxTiles() {
-    return fetch('/api/skyboxes', { cache: 'no-store' })
+    return fetch(DATA_ROOT + 'manifest.json', { cache: 'no-cache' })
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (j) { return j && j.files && Object.keys(j.files).length ? j : null; })
+      .then(function (m) {
+        if (!m || !m.files || !m.files.length) return null;
+        return Promise.all(m.files.map(function (name) {
+          return fetch(DATA_ROOT + name, { cache: 'no-cache' })
+            // r.blob() is a promise, and FileReader wants the Blob itself, so the
+            // conversion has to wait on it. Passing either the Response or the
+            // pending promise throws, and the catch below turns that into a silent
+            // null for every tile - which is exactly what it looked like: no error,
+            // just 402 tiles and no skyboxes.
+            .then(function (r) { return r.ok ? r.blob().then(blobToBase64) : null; })
+            // gfx/ prefix: the game's GFX_DIR_PATH is "gfx", so this has to land at
+            // /gfx/textures/skybox_tiles/<name> to match what the game asks for.
+            .then(function (b64) { return b64 ? ['gfx/textures/skybox_tiles/' + name, b64] : null; })
+            .catch(function () { return null; });
+        })).then(function (pairs) {
+          var files = {};
+          pairs.forEach(function (p) { if (p) files[p[0]] = p[1]; });
+          return Object.keys(files).length ? { files: files, missing: [] } : null;
+        });
+      })
       .catch(function () { return null; });
   }
 
-  // Kept for the standalone case: this page can still be opened on its own, and the
-  // previous launcher's localStorage keys are honoured if present.
+  function blobToBase64(blob) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var s = String(reader.result);
+        resolve(s.slice(s.indexOf(',') + 1));
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  // The file the launcher writes. The earlier JSON form is still honoured so an old
+  // localStorage entry from a previous version still boots.
   var RAW_INI_KEY = 'sm64plus.web.settings.ini';
 
   function buildSettingsIni() {
-    // Preferred path: the real GameMaker launcher's settings file, from the server.
-    var fromServer = window.__launcherIni;
-    if (fromServer && fromServer.trim()) return fromServer;
-
     try {
       var ini = localStorage.getItem(RAW_INI_KEY);
       if (ini && ini.trim()) return ini;
@@ -264,28 +284,23 @@
     }
   });
 
-  // Load the module only once the settings and the missing skybox tiles are in hand.
-  // The game reads settings.ini from its filesystem during startup, and an async preRun
-  // hook is not awaited by this Emscripten build, so those files have to be fetched
-  // before sm64.us.js is even requested. Otherwise configfile_load() runs against an
-  // empty filesystem, writes the defaults, and every option the player set is lost -
-  // and the skyboxes are missing for good.
-  Promise.all([
-    fetchLauncherIni().catch(function () { return null; }),
-    fetchSkyboxTiles().catch(function () { return null; })
-  ]).then(function (results) {
-    if (results[0]) window.__launcherIni = results[0];
-    if (results[1]) {
-      window.__skyboxes = results[1];
-      if (results[1].missing && results[1].missing.length) {
-        console.warn('[launcher] skyboxes not restored: ' + results[1].missing.join('; '));
-      }
-    }
-    var s = document.createElement('script');
-    s.async = true;
-    s.src = 'sm64.us.js';
-    document.body.appendChild(s);
-  });
+  // Load the module only once the missing skybox tiles are in hand. settings.ini needs
+  // no fetching: it is already in localStorage, written by the launcher, so preRun can
+  // read it synchronously. The skyboxes do have to be fetched first, because an async
+  // preRun hook is not awaited by this Emscripten build - if they are written after
+  // the module script loads, configfile_load() has already run and the options the
+  // player set are lost.
+  fetchSkyboxTiles()
+    .then(function (sky) {
+      if (sky) window.__skyboxes = sky;
+    })
+    .catch(function () { /* the game still runs, just without the restored skyboxes */ })
+    .then(function () {
+      var s = document.createElement('script');
+      s.async = true;
+      s.src = 'sm64.us.js';
+      document.body.appendChild(s);
+    });
 })();
 </script>
 </body>

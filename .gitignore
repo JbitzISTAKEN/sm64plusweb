@@ -7,7 +7,6 @@ game/
 textures/
 build/
 
-# The WebAssembly build is a build artefact, not source.
-wasm/*.wasm
-wasm/*.data
-wasm/*.js
+# The WebAssembly build is committed on purpose now: the launcher is served as static
+# files from a CDN, so public/game/ has to be in the repository for the game to load.
+# It was ignored back when a local server could reach outside the repo for it.

@@ -45,7 +45,7 @@ const MIME = {
 
 // Where the WebAssembly build lives. SM64PLUS_WASM_DIR overrides it; otherwise the
 // copy that ships next to the launcher is used.
-const WASM_DIR = process.env.SM64PLUS_WASM_DIR || path.join(ROOT, "wasm");
+const WASM_DIR = process.env.SM64PLUS_WASM_DIR || path.join(ROOT, "public", "game");
 
 // The settings.ini the launcher had at the moment Start Game was pressed. The
 // browser fetches it over /api/launch-handoff and writes it into the module's
