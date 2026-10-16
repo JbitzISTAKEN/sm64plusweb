@@ -653,6 +653,7 @@ const startGame = {
     this.hold = 0;
     this.frame = 0;
     this.waitFrames = 0;
+    this.ended = 0;
     this.launched = 0;
     this.closed = 0;
     app.screen = "start";
@@ -797,9 +798,21 @@ const startGame = {
     // not, so ending here would strand the player on a launch screen with no way
     // out. Go back to the menu instead and say why.
     if (this.closeOnLaunch) {
+      if (this.ended) return;
       if (this.waitFrames < 30) { this.waitFrames++; return; }
-      background.displayMessage("A browser tab can't close itself, so the launcher stays open. Close the game window to come back.");
-      this.slideOut = 1;
+      // timer(game_end, 150) ends the launcher process once the game is running.
+      // In a browser that is window.close(). It only takes effect on a tab that
+      // script opened - this one was opened by typing the URL, so it is normally
+      // ignored - and window.close() fails silently rather than throwing, so the
+      // only way to know is to look afterwards. `ended` keeps this to one attempt:
+      // game_end is a one-shot timer, not something that repeats every frame.
+      this.ended = 1;
+      window.close();
+      window.setTimeout(() => {
+        if (window.closed) return;
+        background.displayMessage("The browser wouldn't close this tab. Close it yourself, or turn Close on Launch off to keep the launcher here.");
+        this.slideOut = 1;
+      }, 300);
     }
   },
 
