@@ -716,9 +716,9 @@ const startGame = {
 
   launch() {
     if (!this.gameWindow) return false;
+    if (!showGameWindow(this.gameWindow)) return false;
     try {
       this.gameWindow.location = this.target;
-      this.gameWindow.focus();
     } catch {
       return false;
     }
@@ -835,36 +835,36 @@ async function runGame() {
 // refused. So the window is created blank and navigated later, once the launch screen
 // has played out.
 function openGameWindow() {
-  // The same size as the launcher window, which is what the original's game window
-  // ends up as: DEFAULT_LAUNCHER_WIDTH/HEIGHT in scr_constants_and_globals.gml are
-  // the numbers the launcher opens itself at, and execute_shell() starts the game as
-  // a peer window rather than anything the game sizes for itself. Centred on the
-  // launcher, the way execute_shell()'s window comes up over it.
-  const width = app.launcher.window_width || 1280;
-  const height = app.launcher.window_height || 720;
-  const left = window.screenX + (window.outerWidth - width) / 2;
-  const top = window.screenY + (window.outerHeight - height) / 2;
-  const features = `width=${width},height=${height},left=${Math.round(left)},top=${Math.round(top)}`
-    + ",menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=no";
+  // A popup has to be opened inside the gesture that pressed Start Game, or the
+  // browser refuses it - and the original gets away with a plain timer because there
+  // is no popup blocker. So the window is created here, off-screen and 1x1, and only
+  // sized and positioned once the launch screen has played out. Nothing of it is
+  // visible until then: the player sees the launch screen, then the game window.
   let win = null;
   try {
-    win = window.open("about:blank", "sm64plus-game", features);
+    win = window.open("about:blank", "sm64plus-game",
+      "width=1,height=1,left=-2000,top=-2000,menubar=no,toolbar=no,location=no,status=no");
   } catch {
     win = null;
   }
-  if (!win) return null;
-  try {
-    // A blank white window for five seconds would look broken, so it says what it is.
-    win.document.title = "SM64Plus";
-    win.document.documentElement.style.background = "#000";
-    win.document.body.style.cssText = "margin:0;background:#000;height:100vh;display:flex;"
-      + "align-items:center;justify-content:center;color:#8a8a8a;"
-      + "font:12px ui-monospace,Menlo,monospace";
-    win.document.body.textContent = "Starting...";
-  } catch {
-    // Cross-origin: leave it blank rather than failing the launch.
-  }
   return win;
+}
+
+// Sized and centred here rather than at creation, so the off-screen 1x1 window the
+// gesture had to open is still off-screen while the launch screen plays.
+function showGameWindow(win) {
+  const width = 450;
+  const height = 337.5;
+  const left = window.screenX + (window.outerWidth - width) / 2;
+  const top = window.screenY + (window.outerHeight - height) / 2;
+  try {
+    win.resizeTo(width, height);
+    win.moveTo(Math.round(left), Math.round(top));
+    win.focus();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // The game used to run in a frame laid over the launcher canvas, which stopped the
